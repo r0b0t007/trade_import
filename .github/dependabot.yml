@@ -8,3 +8,7 @@ updates:
     directory: /
     schedule:
       interval: weekly
+    ignore:
+      # The build backend follows Frappe and ERPNext, which still pin flit_core <4.
+      - dependency-name: flit-core
+        update-types: ["version-update:semver-major"]
