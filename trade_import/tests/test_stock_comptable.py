@@ -26,6 +26,16 @@ def _ensure_test_master_data() -> tuple[str, str, str, str, str, str]:
 			}
 		).insert(ignore_permissions=True)
 
+	# A fresh site (CI) has no Party Types; ERPNext checks a party account against this type.
+	if not frappe.db.exists("Party Type", "Supplier"):
+		frappe.get_doc(
+			{
+				"doctype": "Party Type",
+				"party_type": "Supplier",
+				"account_type": "Payable",
+			}
+		).insert(ignore_permissions=True)
+
 	if not frappe.db.exists("Warehouse Type", "Transit"):
 		frappe.get_doc({"doctype": "Warehouse Type", "name": "Transit"}).insert(ignore_permissions=True)
 

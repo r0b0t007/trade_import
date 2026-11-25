@@ -229,7 +229,11 @@ class TestForeignPayables(IntegrationTestCase):
 		pe.source_exchange_rate = 1
 		pe.target_exchange_rate = 10.5
 		pe.paid_amount = flt(pe.received_amount * 10.5, 2)
-		pe.mode_of_payment = pe.mode_of_payment or "Cash"
+		if not frappe.db.exists("Mode of Payment", "Cash"):  # a fresh site has none
+			frappe.get_doc({"doctype": "Mode of Payment", "mode_of_payment": "Cash", "type": "Cash"}).insert(
+				ignore_permissions=True
+			)
+		pe.mode_of_payment = "Cash"
 		pe.insert(ignore_permissions=True)
 		pe.submit()
 

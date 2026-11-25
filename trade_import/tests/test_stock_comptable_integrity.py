@@ -283,6 +283,9 @@ class TestStockComptableIntegrity(IntegrationTestCase):
 					"bill_no": "SC-PI-1",
 					"bill_date": nowdate(),
 					"update_stock": 1,
+					# Set explicitly: a fresh site defaults the document currency to INR.
+					"currency": self.currency,
+					"conversion_rate": 1.0,
 					"items": [
 						{
 							"item_code": self.item_code,
