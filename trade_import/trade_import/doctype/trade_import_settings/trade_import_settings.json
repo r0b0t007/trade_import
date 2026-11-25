@@ -1,0 +1,90 @@
+{
+ "actions": [],
+ "creation": "2026-11-25 11:30:00",
+ "doctype": "DocType",
+ "engine": "InnoDB",
+ "field_order": [
+  "stock_comptable_section",
+  "enable_stock_comptable",
+  "require_delivery_note_before_invoice",
+  "allow_negative_stock_comptable",
+  "supplier_payables_section",
+  "supplier_currencies"
+ ],
+ "fields": [
+  {
+   "default": "0",
+   "description": "Maintient un registre parallèle Stock Comptable qui ne diminue qu'à la validation de la facture client (et non au bon de livraison).",
+   "fieldname": "enable_stock_comptable",
+   "fieldtype": "Check",
+   "label": "Activer le stock comptable parallèle"
+  },
+  {
+   "default": "0",
+   "description": "Oblige chaque ligne d'article stockable d'une facture de vente (hors avoir) à être liée à un bon de livraison validé.",
+   "fieldname": "require_delivery_note_before_invoice",
+   "fieldtype": "Check",
+   "label": "Exiger un bon de livraison avant la facture"
+  },
+  {
+   "default": "0",
+   "depends_on": "eval:doc.enable_stock_comptable",
+   "fieldname": "allow_negative_stock_comptable",
+   "fieldtype": "Check",
+   "label": "Autoriser le stock comptable négatif"
+  },
+  {
+   "fieldname": "supplier_payables_section",
+   "fieldtype": "Section Break",
+   "label": "Fournisseurs étrangers",
+   "permlevel": 1
+  },
+  {
+   "description": "Un compte fournisseur est créé par devise pour chaque société, puis rattaché au fournisseur dont la devise de facturation correspond. Le paiement se fait depuis le compte bancaire en devise de la société. Retirer une devise ne supprime pas son compte.",
+   "fieldname": "supplier_currencies",
+   "fieldtype": "Table",
+   "label": "Devises des fournisseurs étrangers",
+   "options": "Trade Import Supplier Currency",
+   "permlevel": 1
+  }
+ ],
+ "issingle": 1,
+ "links": [],
+ "module": "Trade Import",
+ "name": "Trade Import Settings",
+ "owner": "Administrator",
+ "permissions": [
+  {
+   "create": 1,
+   "delete": 1,
+   "read": 1,
+   "role": "System Manager",
+   "write": 1
+  },
+  {
+   "read": 1,
+   "role": "Stock Manager",
+   "write": 1
+  },
+  {
+   "read": 1,
+   "role": "Accounts Manager",
+   "write": 1
+  },
+  {
+   "permlevel": 1,
+   "read": 1,
+   "role": "System Manager",
+   "write": 1
+  },
+  {
+   "permlevel": 1,
+   "read": 1,
+   "role": "Accounts Manager",
+   "write": 1
+  }
+ ],
+ "sort_field": "modified",
+ "sort_order": "DESC",
+ "track_changes": 1
+}

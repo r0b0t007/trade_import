@@ -4,3 +4,4 @@
 
 [post_model_sync]
 # Patches added in this section will be executed after doctypes are migrated
+trade_import.patches.add_unique_stock_comptable_bin
