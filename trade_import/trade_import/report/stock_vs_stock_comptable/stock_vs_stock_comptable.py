@@ -69,48 +69,66 @@ def get_columns():
 
 def get_data(filters):
 	precision = cint(frappe.db.get_default("float_precision")) or 3
-	conditions = []
-	values = {}
+	item = frappe.qb.DocType("Item")
+	warehouse = frappe.qb.DocType("Warehouse")
 
-	if filters.get("company"):
-		conditions.append("wh.company = %(company)s")
-		values["company"] = filters.company
-	if filters.get("warehouse"):
-		conditions.append("pairs.warehouse = %(warehouse)s")
-		values["warehouse"] = filters.warehouse
-	if filters.get("item_code"):
-		conditions.append("pairs.item_code = %(item_code)s")
-		values["item_code"] = filters.item_code
+	def bin_rows(bin_table, *extra_columns):
+		"""Rows of one bin table, with the item and warehouse filters of the report applied."""
+		query = (
+			frappe.qb.from_(bin_table)
+			.inner_join(item)
+			.on(item.name == bin_table.item_code)
+			.inner_join(warehouse)
+			.on(warehouse.name == bin_table.warehouse)
+			.select(
+				bin_table.item_code,
+				bin_table.warehouse,
+				bin_table.actual_qty,
+				item.item_name,
+				item.stock_uom,
+				*extra_columns,
+			)
+		)
+		if filters.get("company"):
+			query = query.where(warehouse.company == filters.company)
+		if filters.get("warehouse"):
+			query = query.where(bin_table.warehouse == filters.warehouse)
+		if filters.get("item_code"):
+			query = query.where(bin_table.item_code == filters.item_code)
+		return query.run(as_dict=True)
 
-	where_clause = f"WHERE {' AND '.join(conditions)}" if conditions else ""
+	real_bin = frappe.qb.DocType("Bin")
+	comptable_bin = frappe.qb.DocType("Stock Comptable Bin")
 
-	rows = frappe.db.sql(
-		f"""
-		SELECT
-			pairs.item_code,
-			item.item_name,
-			pairs.warehouse,
-			item.stock_uom,
-			COALESCE(bin.actual_qty, 0) AS stock_qty,
-			COALESCE(bin.reserved_qty, 0) AS reserved_qty,
-			COALESCE(scb.actual_qty, 0) AS stock_comptable_qty
-		FROM (
-			SELECT item_code, warehouse FROM `tabBin`
-			UNION
-			SELECT item_code, warehouse FROM `tabStock Comptable Bin`
-		) AS pairs
-		INNER JOIN `tabItem` AS item ON item.name = pairs.item_code
-		INNER JOIN `tabWarehouse` AS wh ON wh.name = pairs.warehouse
-		LEFT JOIN `tabBin` AS bin
-			ON bin.item_code = pairs.item_code AND bin.warehouse = pairs.warehouse
-		LEFT JOIN `tabStock Comptable Bin` AS scb
-			ON scb.item_code = pairs.item_code AND scb.warehouse = pairs.warehouse
-		{where_clause}
-		ORDER BY pairs.item_code ASC, pairs.warehouse ASC
-		""",
-		values,
-		as_dict=True,
-	)
+	# Every (item, warehouse) pair that exists in either ledger, real or comptable.
+	pairs: dict[tuple[str, str], frappe._dict] = {}
+	for bin_row in bin_rows(real_bin, real_bin.reserved_qty):
+		pairs[(bin_row.item_code, bin_row.warehouse)] = frappe._dict(
+			item_code=bin_row.item_code,
+			item_name=bin_row.item_name,
+			warehouse=bin_row.warehouse,
+			stock_uom=bin_row.stock_uom,
+			stock_qty=bin_row.actual_qty,
+			reserved_qty=bin_row.reserved_qty or 0,
+			stock_comptable_qty=0,
+		)
+	for bin_row in bin_rows(comptable_bin):
+		key = (bin_row.item_code, bin_row.warehouse)
+		row = pairs.setdefault(
+			key,
+			frappe._dict(
+				item_code=bin_row.item_code,
+				item_name=bin_row.item_name,
+				warehouse=bin_row.warehouse,
+				stock_uom=bin_row.stock_uom,
+				stock_qty=0,
+				reserved_qty=0,
+				stock_comptable_qty=0,
+			),
+		)
+		row.stock_comptable_qty = bin_row.actual_qty or 0
+
+	rows = [pairs[key] for key in sorted(pairs)]
 
 	result = []
 	only_diff = cint(filters.get("only_differences"))

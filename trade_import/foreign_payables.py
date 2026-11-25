@@ -161,7 +161,7 @@ def warn_missing_unrealized_exchange_account(currencies: list[str]) -> None:
 		)
 
 
-def after_setup_wizard(args=None) -> None:
+def after_setup_wizard(setup_args=None) -> None:
 	"""Create the payable accounts once the setup wizard has created the company.
 
 	An error here is logged and never blocks the wizard: the accounts are also created

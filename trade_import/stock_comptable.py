@@ -7,7 +7,6 @@ from frappe.utils import cint, flt, nowdate, nowtime
 SETTINGS_DOCTYPE = "Trade Import Settings"
 ENTRY_DOCTYPE = "Stock Comptable Entry"
 BIN_DOCTYPE = "Stock Comptable Bin"
-SEED_BATCH_SIZE = 200
 # A named tuple, not `except A, B:`: ruff's formatter drops the parentheses for Python 3.14, and
 # the pre-commit syntax hook runs on an older Python that cannot parse that form.
 _BIN_INSERT_RACE_ERRORS = (frappe.DuplicateEntryError, frappe.exceptions.UniqueValidationError)
@@ -509,13 +508,14 @@ def on_submit_stock_reconciliation(doc, method=None) -> None:
 	_post_movements(_reconciliation_movements(doc), doc)
 
 
-def initialise_missing_bins(item_code: str | None = None, commit_every: int = 0) -> dict:
+def initialise_missing_bins(item_code: str | None = None) -> dict:
 	"""Seed a Stock Comptable bin from the real stock for every positive pair that has none yet.
 
 	Idempotent: a pair that already has a bin is left untouched, so running it twice changes
 	nothing. A pair with negative real stock is not seeded (it would bypass the negative-stock
 	setting) and is counted in `skipped_negative`. Each seeded pair gets one opening entry,
-	voucher Trade Import Settings. `commit_every` commits per batch, for background runs.
+	voucher Trade Import Settings. Run it as a background job for a large stock: the job commits
+	once, when it ends.
 	"""
 	precision = _qty_precision()
 	extra = {"item_code": item_code} if item_code else {}
@@ -565,8 +565,6 @@ def initialise_missing_bins(item_code: str | None = None, commit_every: int = 0)
 				}
 			).insert(ignore_permissions=True)
 			created += 1
-			if commit_every and created % commit_every == 0:
-				frappe.db.commit()
 	finally:
 		frappe.flags.in_stock_comptable_posting = prev_flag
 	return {
@@ -578,7 +576,7 @@ def initialise_missing_bins(item_code: str | None = None, commit_every: int = 0)
 
 def seed_in_background() -> None:
 	"""Background job: seed the ledger from the real stock, then tell the user who asked for it."""
-	result = initialise_missing_bins(commit_every=SEED_BATCH_SIZE)
+	result = initialise_missing_bins()
 	frappe.publish_realtime(
 		"msgprint",
 		{
