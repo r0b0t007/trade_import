@@ -182,6 +182,20 @@ doc_events = {
 		"on_submit": "trade_import.stock_comptable.on_submit_stock_voucher",
 		"on_cancel": "trade_import.stock_comptable.on_cancel_stock_voucher",
 	},
+	# Other vouchers that move real stock outside the Delivery Note. The mirror reads their
+	# Stock Ledger Entries, so a Purchase Invoice without update stock posts nothing.
+	"Purchase Invoice": {
+		"on_submit": "trade_import.stock_comptable.on_submit_stock_voucher",
+		"on_cancel": "trade_import.stock_comptable.on_cancel_stock_voucher",
+	},
+	"Subcontracting Receipt": {
+		"on_submit": "trade_import.stock_comptable.on_submit_stock_voucher",
+		"on_cancel": "trade_import.stock_comptable.on_cancel_stock_voucher",
+	},
+	"Asset Capitalization": {
+		"on_submit": "trade_import.stock_comptable.on_submit_stock_voucher",
+		"on_cancel": "trade_import.stock_comptable.on_cancel_stock_voucher",
+	},
 	"Stock Reconciliation": {
 		"on_submit": "trade_import.stock_comptable.on_submit_stock_reconciliation",
 		"on_cancel": "trade_import.stock_comptable.on_cancel_stock_voucher",
