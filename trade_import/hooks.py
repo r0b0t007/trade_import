@@ -1,6 +1,6 @@
 app_name = "trade_import"
 app_title = "Trade Import"
-app_publisher = "Bangicode SARL"
+app_publisher = "Fake Company SARL"
 app_description = "Dossier Importation, landed cost split, import reports, supplier credit limit, cash count"
 app_email = "ahmedchioua@gmail.com"
 app_license = "gpl-3.0"

@@ -1,12 +1,12 @@
 # trade_import
 
-Trade Import: a Frappe app for ERPNext 16 by Bangicode SARL. Part of the MaroneERP white-label build (Linear project MaroneERP, team CHW).
+Trade Import: a Frappe app for ERPNext 16 by Fake Company SARL. Part of the MaroneERP white-label build (Linear project MaroneERP, team CHW).
 
 - Requires: `erpnext` (`required_apps` in `hooks.py`).
-- Architecture: `bangicode-infra/docs/adr/0001-app-split.md`.
+- Architecture: `fake-company-infra/docs/adr/0001-app-split.md`.
 - Reference the Linear issue (`CHW-123`) in branch names, commits and PRs.
 
-## Commands (inside the dev container, `bangicode-infra/dev/`)
+## Commands (inside the dev container, `fake-company-infra/dev/`)
 
 ```bash
 bench --site marone.localhost run-tests --app trade_import

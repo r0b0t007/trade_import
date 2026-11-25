@@ -1,7 +1,7 @@
 [project]
 name = "trade_import"
 authors = [
-    { name = "Bangicode SARL", email = "ahmedchioua@gmail.com"}
+    { name = "Fake Company SARL", email = "ahmedchioua@gmail.com"}
 ]
 description = "Dossier Importation, landed cost split, import reports, supplier credit limit, cash count"
 requires-python = ">=3.14"
