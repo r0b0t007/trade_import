@@ -159,13 +159,34 @@ required_apps = ["erpnext"]
 # ---------------
 # Hook on document methods and events
 
-# doc_events = {
-# 	"*": {
-# 		"on_update": "method",
-# 		"on_cancel": "method",
-# 		"on_trash": "method"
-# 	}
-# }
+doc_events = {
+	"Supplier": {
+		"before_validate": "trade_import.foreign_payables.attach_party_account",
+	},
+	"Company": {
+		"on_update": "trade_import.foreign_payables.company_on_update",
+	},
+	"Sales Invoice": {
+		"validate": "trade_import.stock_comptable.validate_sales_invoice",
+		"on_submit": "trade_import.stock_comptable.on_submit_sales_invoice",
+		"on_cancel": "trade_import.stock_comptable.on_cancel_sales_invoice",
+	},
+	"Delivery Note": {
+		"on_cancel": "trade_import.stock_comptable.on_cancel_delivery_note",
+	},
+	"Purchase Receipt": {
+		"on_submit": "trade_import.stock_comptable.on_submit_stock_voucher",
+		"on_cancel": "trade_import.stock_comptable.on_cancel_stock_voucher",
+	},
+	"Stock Entry": {
+		"on_submit": "trade_import.stock_comptable.on_submit_stock_voucher",
+		"on_cancel": "trade_import.stock_comptable.on_cancel_stock_voucher",
+	},
+	"Stock Reconciliation": {
+		"on_submit": "trade_import.stock_comptable.on_submit_stock_reconciliation",
+		"on_cancel": "trade_import.stock_comptable.on_cancel_stock_voucher",
+	},
+}
 
 # Scheduled Tasks
 # ---------------
@@ -222,7 +243,10 @@ required_apps = ["erpnext"]
 # Ignore links to specified DocTypes when deleting documents
 # -----------------------------------------------------------
 
-# ignore_links_on_delete = ["Communication", "ToDo"]
+ignore_links_on_delete = ["Stock Comptable Entry"]
+
+# Create the foreign-currency supplier payable accounts once the setup wizard has made the company.
+setup_wizard_complete = ["trade_import.foreign_payables.after_setup_wizard"]
 
 # Request Events
 # ----------------
