@@ -10,6 +10,29 @@ app_license = "gpl-3.0"
 
 required_apps = ["erpnext"]
 
+# Fixtures
+# --------
+# Every Desk customization of this app. Export with:
+#   bench --site marone.localhost export-fixtures --app trade_import
+fixtures = [
+	{
+		"dt": "Custom Field",
+		"filters": [
+			[
+				"name",
+				"in",
+				[
+					"Purchase Order-dossier_importation",
+					"Purchase Order Item-dossier_importation",
+					"Purchase Receipt-dossier_importation",
+					"Purchase Invoice-dossier_importation",
+					"Item-volume_par_unite",
+				],
+			]
+		],
+	},
+]
+
 # Each item in the list will be shown as an app in the apps page
 # add_to_apps_screen = [
 # 	{
