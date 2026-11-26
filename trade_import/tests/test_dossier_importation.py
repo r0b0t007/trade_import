@@ -1,10 +1,14 @@
+from unittest.mock import patch
+
 import frappe
 from frappe.tests import IntegrationTestCase
-from frappe.utils import flt, nowdate
+from frappe.utils import add_days, flt, nowdate
 
 from trade_import import dossier_flow as flow
+from trade_import import foreign_payables
 from trade_import.tests.test_stock_comptable import _ensure_test_master_data
 
+SAVEPOINT = "test_dossier_flow"
 LINKED = ("Purchase Order", "Purchase Order Item", "Purchase Receipt", "Purchase Invoice")
 
 
@@ -136,3 +140,157 @@ class TestDossierValidation(IntegrationTestCase):
 		row = self.dossier(currency=currency, exchange_rate=7).articles[0]
 		self.assertEqual(flt(row.exchange_rate), 1)
 		self.assertEqual(flt(row.valeur_mad), flt(row.amount))
+
+
+def make_supplier(name, currency):
+	if not frappe.db.exists("Supplier", name):
+		frappe.get_doc(
+			{
+				"doctype": "Supplier",
+				"supplier_name": name,
+				"supplier_group": frappe.db.get_value("Supplier Group", {"is_group": 0}, "name")
+				or frappe.get_doc({"doctype": "Supplier Group", "supplier_group_name": "_Test DI Group"})
+				.insert(ignore_permissions=True)
+				.name,
+				"default_currency": currency,
+			}
+		).insert(ignore_permissions=True)
+	return name
+
+
+def make_order(supplier, currency, rate, qty, price, item_code, warehouse, company):
+	for code in {currency}:
+		if not frappe.db.exists("Currency", code):
+			frappe.get_doc({"doctype": "Currency", "currency_name": code, "enabled": 1}).insert(
+				ignore_permissions=True
+			)
+	order = frappe.get_doc(
+		{
+			"doctype": "Purchase Order",
+			"supplier": supplier,
+			"company": company,
+			"currency": currency,
+			"conversion_rate": rate,
+			"schedule_date": add_days(nowdate(), 10),
+			"items": [
+				{
+					"item_code": item_code,
+					"qty": qty,
+					"rate": price,
+					"warehouse": warehouse,
+					"schedule_date": add_days(nowdate(), 10),
+				}
+			],
+		}
+	).insert()
+	order.submit()
+	return order
+
+
+class DossierTestCase(IntegrationTestCase):
+	def setUp(self):
+		super().setUp()
+		frappe.db.savepoint(SAVEPOINT)
+		patcher = patch.object(foreign_payables, "get_configured_currencies", return_value=[])
+		patcher.start()
+		self.addCleanup(patcher.stop)
+		(
+			self.company,
+			self.company_currency,
+			_,
+			self.warehouse,
+			self.item_code,
+			_,
+		) = _ensure_test_master_data()
+		self.supplier_a = make_supplier("_Test DI Supplier A", "EUR")
+		self.supplier_b = make_supplier("_Test DI Supplier B", "USD")
+
+	def tearDown(self):
+		frappe.db.rollback(save_point=SAVEPOINT)
+		super().tearDown()
+
+	def order(self, supplier="_Test DI Supplier A", currency="EUR", rate=10.8, qty=100, price=2.5):
+		return make_order(supplier, currency, rate, qty, price, self.item_code, self.warehouse, self.company)
+
+	def dossier(self, **fields):
+		return frappe.get_doc({"doctype": "Dossier Importation", "company": self.company, **fields}).insert()
+
+
+class TestOrderLines(DossierTestCase):
+	def test_an_open_line_is_listed_with_its_order_data(self):
+		order = self.order(qty=100)
+		lines = [l for l in flow.get_open_order_lines(self.company) if l["purchase_order"] == order.name]
+		self.assertEqual(len(lines), 1)
+		line = lines[0]
+		self.assertEqual(
+			(
+				line["supplier"],
+				line["item_code"],
+				flt(line["qty"]),
+				line["currency"],
+				flt(line["conversion_rate"]),
+			),
+			(self.supplier_a, self.item_code, 100, "EUR", 10.8),
+		)
+
+	def test_the_supplier_filter(self):
+		a, b = self.order(), self.order("_Test DI Supplier B", "USD", 9.9)
+		names = {l["purchase_order"] for l in flow.get_open_order_lines(self.company, self.supplier_b)}
+		self.assertEqual(names & {a.name, b.name}, {b.name})
+
+	def test_a_line_taken_by_a_dossier_is_no_longer_listed(self):
+		order = self.order()
+		dossier = self.dossier()
+		flow.add_order_lines(dossier.name, [order.items[0].name])
+		listed = {l["purchase_order"] for l in flow.get_open_order_lines(self.company)}
+		self.assertNotIn(order.name, listed)
+
+	def test_adding_a_line_links_the_order_to_the_dossier(self):
+		order = self.order()
+		dossier = self.dossier()
+		flow.add_order_lines(dossier.name, [order.items[0].name])
+		self.assertEqual(
+			frappe.db.get_value("Purchase Order", order.name, "dossier_importation"), dossier.name
+		)
+		self.assertEqual(
+			frappe.db.get_value("Purchase Order Item", order.items[0].name, "dossier_importation"),
+			dossier.name,
+		)
+
+	def test_a_lowered_line_leaves_the_rest_for_another_dossier(self):
+		order = self.order(qty=100)
+		first = self.dossier()
+		flow.add_order_lines(first.name, [order.items[0].name])
+		first.reload()
+		first.articles[0].qty = 60  # only 60 shipped
+		first.save()
+		available = flow.available_qty([order.items[0].name])
+		self.assertEqual(flt(available[order.items[0].name]), 40)
+		second = self.dossier()
+		flow.add_order_lines(second.name, [order.items[0].name])
+		second.reload()
+		self.assertEqual(flt(second.articles[0].qty), 40)
+
+	def test_a_line_cannot_be_over_allocated(self):
+		order = self.order(qty=100)
+		dossier = self.dossier()
+		flow.add_order_lines(dossier.name, [order.items[0].name])
+		dossier.reload()
+		dossier.articles[0].qty = 150
+		with self.assertRaisesRegex(frappe.ValidationError, "dépasse"):
+			dossier.save()
+
+	def test_every_line_must_belong_to_the_dossier_company(self):
+		order = self.order()
+		other = frappe.get_doc(
+			{
+				"doctype": "Company",
+				"company_name": "_Test DI Other",
+				"abbr": "TDO",
+				"default_currency": self.company_currency,
+				"country": frappe.db.get_value("Company", self.company, "country"),
+			}
+		).insert(ignore_permissions=True)
+		dossier = frappe.get_doc({"doctype": "Dossier Importation", "company": other.name}).insert()
+		with self.assertRaisesRegex(frappe.ValidationError, "n'est plus disponible"):
+			flow.add_order_lines(dossier.name, [order.items[0].name])

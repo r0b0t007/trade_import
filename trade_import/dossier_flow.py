@@ -4,6 +4,8 @@ Pure functions at the top (no database), database functions below. Spec:
 docs/specs/2026-11-26-dossier-importation-design.md
 """
 
+import json
+
 import frappe
 from frappe import _
 from frappe.utils import flt
@@ -144,3 +146,152 @@ def status_of(doc) -> str:
 		all_received,
 		doc.status,
 	)
+
+
+def available_qty(po_items: list[str], exclude_dossier: str | None = None) -> dict[str, float]:
+	"""Quantity of each purchase order line that no Dossier has taken yet.
+
+	Received outside any Dossier counts as taken; a Dossier line counts in full, received or not.
+	`exclude_dossier` leaves one Dossier's own lines out, to check that Dossier on save.
+	"""
+	if not po_items:
+		return {}
+	order_rows = frappe.get_all(
+		"Purchase Order Item",
+		filters={"name": ("in", po_items)},
+		fields=["name", "qty", "received_qty"],
+	)
+	dossier_rows = frappe.get_all(
+		"Dossier Importation Article",
+		filters={"purchase_order_item": ("in", po_items)},
+		fields=["parent", "purchase_order_item", "qty", "received_qty"],
+	)
+	result = {}
+	for order_row in order_rows:
+		mine = [r for r in dossier_rows if r.purchase_order_item == order_row.name]
+		received_in_dossiers = sum(flt(r.received_qty) for r in mine)
+		taken = sum(flt(r.qty) for r in mine if r.parent != exclude_dossier)
+		received_outside = flt(order_row.received_qty) - received_in_dossiers
+		result[order_row.name] = flt(flt(order_row.qty) - received_outside - taken, 6)
+	return result
+
+
+@frappe.whitelist()
+def get_open_order_lines(company: str, supplier: str | None = None) -> list[dict]:
+	"""Purchase order lines still free to put in a Dossier, with the quantity left on each."""
+	frappe.has_permission("Purchase Order", "read", throw=True)
+	order = frappe.qb.DocType("Purchase Order")
+	line = frappe.qb.DocType("Purchase Order Item")
+	query = (
+		frappe.qb.from_(line)
+		.join(order)
+		.on(line.parent == order.name)
+		.select(
+			line.name.as_("purchase_order_item"),
+			line.parent.as_("purchase_order"),
+			order.supplier,
+			order.currency,
+			order.conversion_rate,
+			order.transaction_date,
+			line.item_code,
+			line.item_name,
+			line.uom,
+			line.conversion_factor,
+			line.rate,
+			line.qty,
+			line.received_qty,
+		)
+		.where(
+			(order.docstatus == 1)
+			& (order.company == company)
+			& (order.status.notin(["Closed", "On Hold", "Completed", "Cancelled"]))
+			& (line.received_qty < line.qty)
+		)
+		.orderby(order.transaction_date)
+	)
+	if supplier:
+		query = query.where(order.supplier == supplier)
+	rows = query.run(as_dict=True)
+	left = available_qty([row.purchase_order_item for row in rows])
+	open_lines = []
+	for row in rows:
+		remaining = left.get(row.purchase_order_item, 0)
+		if remaining > 0:
+			row["qty"] = remaining
+			open_lines.append(row)
+	return open_lines
+
+
+def check_lines(doc) -> None:
+	"""Every line belongs to the company, and no purchase order line is over-allocated."""
+	rows = [row for row in doc.articles if row.purchase_order_item]
+	if not rows:
+		return
+	companies = dict(
+		frappe.get_all(
+			"Purchase Order",
+			filters={"name": ("in", list({row.purchase_order for row in rows}))},
+			fields=["name", "company"],
+			as_list=True,
+		)
+	)
+	wanted: dict[str, float] = {}
+	for row in rows:
+		if companies.get(row.purchase_order) != doc.company:
+			frappe.throw(
+				_("Ligne {0} : la commande {1} n'appartient pas à la société {2}.").format(
+					row.idx, frappe.bold(row.purchase_order), frappe.bold(doc.company)
+				)
+			)
+		wanted[row.purchase_order_item] = wanted.get(row.purchase_order_item, 0) + flt(row.qty)
+	left = available_qty(list(wanted), exclude_dossier=None if doc.is_new() else doc.name)
+	for po_item, qty in wanted.items():
+		if flt(qty, 6) > flt(left.get(po_item, 0), 6):
+			frappe.throw(
+				_("La quantité de la ligne de commande {0} dépasse ce qui reste à expédier ({1}).").format(
+					frappe.bold(po_item), left.get(po_item, 0)
+				)
+			)
+
+
+@frappe.whitelist()
+def add_order_lines(dossier: str, po_items: list[str] | str) -> None:
+	"""Put the chosen purchase order lines in the Dossier, with the quantity left on each."""
+	doc = frappe.get_doc("Dossier Importation", dossier)
+	doc.check_permission("write")
+	if isinstance(po_items, str):
+		po_items = json.loads(po_items)
+	open_lines = {line.purchase_order_item: line for line in get_open_order_lines(doc.company)}
+	for name in po_items:
+		line = open_lines.get(name)
+		if not line:
+			frappe.throw(_("La ligne {0} n'est plus disponible.").format(frappe.bold(name)))
+		doc.append(
+			"articles",
+			{
+				"purchase_order": line.purchase_order,
+				"purchase_order_item": line.purchase_order_item,
+				"supplier": line.supplier,
+				"item_code": line.item_code,
+				"item_name": line.item_name,
+				"qty": line.qty,
+				"uom": line.uom,
+				"conversion_factor": line.conversion_factor,
+				"currency": line.currency,
+				"rate": line.rate,
+				"exchange_rate": line.conversion_rate,
+			},
+		)
+	doc.save()
+	# The link on the order is a convenience for the connections panel; the item lines are the record.
+	for name in po_items:
+		frappe.db.set_value(
+			"Purchase Order Item", name, "dossier_importation", doc.name, update_modified=False
+		)
+		frappe.db.set_value(
+			"Purchase Order",
+			open_lines[name].purchase_order,
+			"dossier_importation",
+			doc.name,
+			update_modified=False,
+		)

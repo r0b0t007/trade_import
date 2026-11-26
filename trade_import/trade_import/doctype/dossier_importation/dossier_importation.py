@@ -7,6 +7,7 @@ class DossierImportation(Document):
 	"""One shipment: its orders, receipts and costs. The logic is in trade_import.dossier_flow."""
 
 	def validate(self):
+		flow.check_lines(self)
 		flow.prepare_lines(self)
 		flow.set_totals(self)
 		self.status = flow.status_of(self)
