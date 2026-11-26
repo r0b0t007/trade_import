@@ -4,6 +4,7 @@ Pure functions at the top (no database), database functions below. Spec:
 docs/specs/2026-11-26-dossier-importation-design.md
 """
 
+import frappe
 from frappe.utils import flt
 
 STATUS_DRAFT = "Brouillon"
@@ -65,3 +66,60 @@ def packing_values(
 	if entered:
 		return weight, volume, FROM_LIST
 	return weight, volume, FROM_ITEM if (weight or volume) else ""
+
+
+# ---------------------------------------------------------------------------------------------
+# Validation of a Dossier
+# ---------------------------------------------------------------------------------------------
+
+
+def prepare_lines(doc) -> None:
+	"""Quantities, values and packing figures of every item line."""
+	company_currency = frappe.get_cached_value("Company", doc.company, "default_currency")
+	codes = {row.item_code for row in doc.articles if row.item_code}
+	items = {
+		item.name: item
+		for item in frappe.get_all(
+			"Item",
+			filters={"name": ("in", list(codes))},
+			fields=["name", "weight_per_unit", "weight_uom", "volume_par_unite"],
+		)
+	}
+	for row in doc.articles:
+		row.stock_qty = flt(flt(row.qty) * flt(row.conversion_factor or 1), row.precision("stock_qty"))
+		row.amount = flt(flt(row.qty) * flt(row.rate), row.precision("amount"))
+		row.exchange_rate = 1.0 if row.currency == company_currency else flt(row.exchange_rate) or 1.0
+		row.valeur_mad = flt(row.amount * row.exchange_rate, row.precision("valeur_mad"))
+		item = items.get(row.item_code)
+		row.poids_kg, row.volume_m3, row.source_colisage = packing_values(
+			row.source_colisage,
+			row.poids_kg,
+			row.volume_m3,
+			row.stock_qty,
+			unit_weight_kg(item.weight_per_unit, item.weight_uom) if item else 0,
+			flt(item.volume_par_unite) if item else 0,
+		)
+		row.poids_kg = flt(row.poids_kg, row.precision("poids_kg"))
+		row.volume_m3 = flt(row.volume_m3, row.precision("volume_m3"))
+
+
+def set_totals(doc) -> None:
+	doc.total_valeur_mad = flt(
+		sum(flt(row.valeur_mad) for row in doc.articles), doc.precision("total_valeur_mad")
+	)
+	doc.total_poids_kg = flt(sum(flt(row.poids_kg) for row in doc.articles), doc.precision("total_poids_kg"))
+	doc.total_volume_m3 = flt(
+		sum(flt(row.volume_m3) for row in doc.articles), doc.precision("total_volume_m3")
+	)
+
+
+def status_of(doc) -> str:
+	rows = doc.articles
+	all_received = bool(rows) and all(flt(row.received_qty, 6) >= flt(row.qty, 6) for row in rows)
+	return compute_status(
+		bool(rows),
+		bool(doc.date_depart_reelle),
+		bool(doc.date_arrivee_reelle),
+		all_received,
+		doc.status,
+	)
