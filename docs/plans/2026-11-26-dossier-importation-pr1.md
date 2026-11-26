@@ -869,7 +869,7 @@ class DossierTestCase(IntegrationTestCase):
 
 	def dossier(self, **fields):
 		return frappe.get_doc({"doctype": "Dossier Importation", "company": self.company, **fields}).insert()
-
+```
 
 Then the tests:
 
