@@ -66,9 +66,9 @@ def receipt_on_cancel(doc, method=None) -> None
 
 ---
 
-### Tasks 1 and 2 (one task: one implementer, one review): Custom Fields, fixtures hook and the two DocTypes
+### Task 1: Custom Fields, fixtures hook and the two DocTypes (the former Tasks 1 and 2, merged)
 
-> The Custom Fields link to the DocType that Task 2 creates, so neither can migrate alone. Do the steps of Task 1, then Task 2, then run both sets of tests and commit once as Step 6 says.
+> The Custom Fields link to the DocType that Task 2 creates, so neither can migrate alone. Do Part 1, then Part 2, then run both sets of tests and commit once as Step 6 says.
 
 #### Part 1: Custom Fields and the fixtures hook
 
