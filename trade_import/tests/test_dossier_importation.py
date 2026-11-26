@@ -109,3 +109,30 @@ class TestDossierValidation(IntegrationTestCase):
 		dossier.date_arrivee_reelle = nowdate()
 		dossier.save()
 		self.assertEqual(dossier.status, flow.STATUS_IN_CUSTOMS)
+
+	def test_typed_weight_survives_a_resave(self):
+		frappe.db.set_value("Item", self.item_code, {"weight_per_unit": 1.5, "weight_uom": "Kg"})
+		dossier = self.dossier()
+		self.assertEqual(dossier.articles[0].source_colisage, flow.FROM_ITEM)
+		dossier.articles[0].poids_kg = 130
+		dossier.save()
+		self.assertEqual(flt(dossier.articles[0].poids_kg), 130)
+		self.assertEqual(dossier.articles[0].source_colisage, flow.FROM_LIST)
+
+	def test_item_card_line_follows_a_quantity_change(self):
+		frappe.db.set_value("Item", self.item_code, {"weight_per_unit": 1.5, "weight_uom": "Kg"})
+		dossier = self.dossier()
+		dossier.articles[0].qty = 200
+		dossier.save()
+		self.assertEqual(flt(dossier.articles[0].poids_kg), 300)
+		self.assertEqual(dossier.articles[0].source_colisage, flow.FROM_ITEM)
+
+	def test_a_missing_exchange_rate_is_refused(self):
+		with self.assertRaisesRegex(frappe.ValidationError, "taux de change"):
+			self.dossier(exchange_rate=0)
+
+	def test_company_currency_line_ignores_the_stored_rate(self):
+		currency = frappe.get_cached_value("Company", self.company, "default_currency")
+		row = self.dossier(currency=currency, exchange_rate=7).articles[0]
+		self.assertEqual(flt(row.exchange_rate), 1)
+		self.assertEqual(flt(row.valeur_mad), flt(row.amount))

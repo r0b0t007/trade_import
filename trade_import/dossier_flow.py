@@ -5,6 +5,7 @@ docs/specs/2026-11-26-dossier-importation-design.md
 """
 
 import frappe
+from frappe import _
 from frappe.utils import flt
 
 STATUS_DRAFT = "Brouillon"
@@ -86,18 +87,38 @@ def prepare_lines(doc) -> None:
 		)
 	}
 	for row in doc.articles:
+		previous_stock_qty = flt(row.stock_qty)
 		row.stock_qty = flt(flt(row.qty) * flt(row.conversion_factor or 1), row.precision("stock_qty"))
 		row.amount = flt(flt(row.qty) * flt(row.rate), row.precision("amount"))
-		row.exchange_rate = 1.0 if row.currency == company_currency else flt(row.exchange_rate) or 1.0
+		if row.currency == company_currency:
+			row.exchange_rate = 1.0
+		elif not row.currency or not flt(row.exchange_rate):
+			frappe.throw(
+				_("Ligne {0} : taux de change requis pour la devise {1}.").format(
+					row.idx, row.currency or "?"
+				),
+				title=_("Taux de change manquant"),
+			)
 		row.valeur_mad = flt(row.amount * row.exchange_rate, row.precision("valeur_mad"))
 		item = items.get(row.item_code)
+		unit_weight = unit_weight_kg(item.weight_per_unit, item.weight_uom) if item else 0
+		unit_volume = flt(item.volume_par_unite) if item else 0
+		if item and row.source_colisage == FROM_ITEM:
+			# A figure that no longer matches the item card was typed by the user: keep it.
+			weight_precision, volume_precision = row.precision("poids_kg"), row.precision("volume_m3")
+			if flt(row.poids_kg, weight_precision) != flt(
+				unit_weight * previous_stock_qty, weight_precision
+			) or flt(row.volume_m3, volume_precision) != flt(
+				unit_volume * previous_stock_qty, volume_precision
+			):
+				row.source_colisage = FROM_LIST
 		row.poids_kg, row.volume_m3, row.source_colisage = packing_values(
 			row.source_colisage,
 			row.poids_kg,
 			row.volume_m3,
 			row.stock_qty,
-			unit_weight_kg(item.weight_per_unit, item.weight_uom) if item else 0,
-			flt(item.volume_par_unite) if item else 0,
+			unit_weight,
+			unit_volume,
 		)
 		row.poids_kg = flt(row.poids_kg, row.precision("poids_kg"))
 		row.volume_m3 = flt(row.volume_m3, row.precision("volume_m3"))
