@@ -171,7 +171,7 @@ def available_qty(po_items: list[str], exclude_dossier: str | None = None) -> di
 		mine = [r for r in dossier_rows if r.purchase_order_item == order_row.name]
 		received_in_dossiers = sum(flt(r.received_qty) for r in mine)
 		taken = sum(flt(r.qty) for r in mine if r.parent != exclude_dossier)
-		received_outside = flt(order_row.received_qty) - received_in_dossiers
+		received_outside = max(0, flt(order_row.received_qty) - received_in_dossiers)
 		result[order_row.name] = flt(flt(order_row.qty) - received_outside - taken, 6)
 	return result
 
@@ -227,21 +227,50 @@ def check_lines(doc) -> None:
 	rows = [row for row in doc.articles if row.purchase_order_item]
 	if not rows:
 		return
-	companies = dict(
+	parents = dict(
 		frappe.get_all(
-			"Purchase Order",
-			filters={"name": ("in", list({row.purchase_order for row in rows}))},
-			fields=["name", "company"],
+			"Purchase Order Item",
+			filters={"name": ("in", list({row.purchase_order_item for row in rows}))},
+			fields=["name", "parent"],
 			as_list=True,
 		)
 	)
+	orders = {
+		order.name: order
+		for order in frappe.get_all(
+			"Purchase Order",
+			filters={"name": ("in", list(set(parents.values())))},
+			fields=["name", "company", "docstatus"],
+		)
+	}
 	wanted: dict[str, float] = {}
 	for row in rows:
-		if companies.get(row.purchase_order) != doc.company:
+		real_order = parents.get(row.purchase_order_item)
+		if not real_order:
+			frappe.throw(
+				_("Ligne {0} : la ligne de commande {1} n'existe pas.").format(
+					row.idx, frappe.bold(row.purchase_order_item)
+				)
+			)
+		if row.purchase_order != real_order:
+			frappe.throw(
+				_("Ligne {0} : la ligne de commande {1} appartient à la commande {2}, pas à {3}.").format(
+					row.idx,
+					frappe.bold(row.purchase_order_item),
+					frappe.bold(real_order),
+					frappe.bold(row.purchase_order),
+				)
+			)
+		order = orders[real_order]
+		if order.company != doc.company:
 			frappe.throw(
 				_("Ligne {0} : la commande {1} n'appartient pas à la société {2}.").format(
-					row.idx, frappe.bold(row.purchase_order), frappe.bold(doc.company)
+					row.idx, frappe.bold(real_order), frappe.bold(doc.company)
 				)
+			)
+		if order.docstatus != 1:
+			frappe.throw(
+				_("Ligne {0} : la commande {1} n'est pas validée.").format(row.idx, frappe.bold(real_order))
 			)
 		wanted[row.purchase_order_item] = wanted.get(row.purchase_order_item, 0) + flt(row.qty)
 	left = available_qty(list(wanted), exclude_dossier=None if doc.is_new() else doc.name)
