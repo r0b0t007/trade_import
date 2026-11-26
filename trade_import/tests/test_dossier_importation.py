@@ -418,3 +418,87 @@ class TestReceivedOutsideDossiers(DossierTestCase):
 		dossier.articles[0].qty = 50
 		dossier.save()
 		self.assertEqual(flt(flow.available_qty([line])[line]), 20)
+
+
+class TestReceipts(DossierTestCase):
+	def loaded(self, *orders):
+		dossier = self.dossier()
+		flow.add_order_lines(dossier.name, [o.items[0].name for o in orders])
+		dossier.reload()
+		return dossier
+
+	def test_one_draft_receipt_per_supplier_and_currency(self):
+		a1, a2 = self.order(), self.order(qty=40)
+		b = self.order("_Test DI Supplier B", "USD", 9.9)
+		dossier = self.loaded(a1, a2, b)
+		names = flow.create_receipts(dossier.name)
+		self.assertEqual(len(names), 2)
+		receipts = [frappe.get_doc("Purchase Receipt", n) for n in names]
+		self.assertEqual({r.docstatus for r in receipts}, {0})
+		self.assertEqual({r.dossier_importation for r in receipts}, {dossier.name})
+		self.assertEqual(sorted(len(r.items) for r in receipts), [1, 2])
+
+	def test_the_receipt_takes_the_quantity_of_the_dossier_line(self):
+		order = self.order(qty=100)
+		dossier = self.loaded(order)
+		dossier.articles[0].qty = 60
+		dossier.save()
+		receipt = frappe.get_doc("Purchase Receipt", flow.create_receipts(dossier.name)[0])
+		self.assertEqual(flt(receipt.items[0].qty), 60)
+
+	def test_a_second_draft_receipt_is_refused(self):
+		dossier = self.loaded(self.order())
+		flow.create_receipts(dossier.name)
+		with self.assertRaisesRegex(frappe.ValidationError, "brouillon"):
+			flow.create_receipts(dossier.name)
+
+	def test_nothing_to_receive_is_refused(self):
+		dossier = self.dossier()
+		with self.assertRaisesRegex(frappe.ValidationError, "Rien à réceptionner"):
+			flow.create_receipts(dossier.name)
+
+	def test_submitting_the_receipt_updates_the_dossier(self):
+		order = self.order(qty=100, rate=10.8)
+		dossier = self.loaded(order)
+		receipt = frappe.get_doc("Purchase Receipt", flow.create_receipts(dossier.name)[0])
+		receipt.conversion_rate = 11.0  # the receipt's own rate replaces the order's
+		receipt.submit()
+		dossier.reload()
+		row = dossier.articles[0]
+		self.assertEqual(flt(row.received_qty), 100)
+		self.assertEqual(row.purchase_receipt, receipt.name)
+		self.assertEqual(flt(row.exchange_rate), 11.0)
+		self.assertEqual(flt(row.valeur_mad), 2750)
+		self.assertEqual(dossier.status, flow.STATUS_RECEIVED)
+
+	def test_a_partial_receipt_keeps_the_dossier_open(self):
+		order = self.order(qty=100)
+		dossier = self.loaded(order)
+		receipt = frappe.get_doc("Purchase Receipt", flow.create_receipts(dossier.name)[0])
+		receipt.items[0].qty = 70
+		receipt.items[0].received_qty = 70
+		receipt.save()
+		receipt.submit()
+		dossier.reload()
+		self.assertEqual(flt(dossier.articles[0].received_qty), 70)
+		self.assertNotEqual(dossier.status, flow.STATUS_RECEIVED)
+		second = frappe.get_doc("Purchase Receipt", flow.create_receipts(dossier.name)[0])
+		self.assertEqual(flt(second.items[0].qty), 30)
+		second.submit()
+		dossier.reload()
+		self.assertEqual(flt(dossier.articles[0].received_qty), 100)
+		self.assertEqual(dossier.status, flow.STATUS_RECEIVED)
+
+	def test_cancelling_the_receipt_reopens_the_dossier(self):
+		order = self.order(qty=100, rate=10.8)
+		dossier = self.loaded(order)
+		receipt = frappe.get_doc("Purchase Receipt", flow.create_receipts(dossier.name)[0])
+		receipt.conversion_rate = 11.0
+		receipt.submit()
+		receipt.cancel()
+		dossier.reload()
+		row = dossier.articles[0]
+		self.assertEqual(flt(row.received_qty), 0)
+		self.assertEqual(flt(row.exchange_rate), 10.8)  # back to the order's rate
+		self.assertFalse(row.purchase_receipt)
+		self.assertNotEqual(dossier.status, flow.STATUS_RECEIVED)

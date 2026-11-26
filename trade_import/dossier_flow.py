@@ -324,3 +324,110 @@ def add_order_lines(dossier: str, po_items: list[str] | str) -> None:
 			doc.name,
 			update_modified=False,
 		)
+
+
+@frappe.whitelist()
+def create_receipts(dossier: str) -> list[str]:
+	"""Draft purchase receipts for what is not received yet: one per supplier and currency."""
+	from erpnext.buying.doctype.purchase_order.purchase_order import make_purchase_receipt
+
+	doc = frappe.get_doc("Dossier Importation", dossier)
+	doc.check_permission("write")
+	drafts = frappe.get_all(
+		"Purchase Receipt", filters={"dossier_importation": doc.name, "docstatus": 0}, pluck="name"
+	)
+	if drafts:
+		frappe.throw(
+			_("Un brouillon de réception existe déjà pour ce dossier : {0}.").format(", ".join(drafts))
+		)
+	# (supplier, currency) -> purchase order -> purchase order line -> quantity to receive
+	pending: dict[tuple, dict[str, dict[str, float]]] = {}
+	for row in doc.articles:
+		to_receive = flt(row.qty) - flt(row.received_qty)
+		if to_receive > 0 and row.purchase_order_item:
+			orders = pending.setdefault((row.supplier, row.currency), {})
+			orders.setdefault(row.purchase_order, {})[row.purchase_order_item] = to_receive
+	if not pending:
+		frappe.throw(_("Rien à réceptionner : toutes les lignes sont reçues."))
+	created = []
+	for orders in pending.values():
+		receipt = None
+		for order, lines in orders.items():
+			receipt = make_purchase_receipt(
+				order, target_doc=receipt, args={"filtered_children": list(lines)}
+			)
+		wanted = {name: qty for lines in orders.values() for name, qty in lines.items()}
+		receipt.dossier_importation = doc.name
+		for item in receipt.items:
+			item.qty = wanted[item.purchase_order_item]
+			item.received_qty = item.qty  # nothing rejected: received = accepted
+		receipt.insert()
+		created.append(receipt.name)
+	return created
+
+
+def refresh_from_receipts(dossier: str, ignore_receipt: str | None = None) -> None:
+	"""Received quantities, receipt references and rates of the Dossier lines, from the receipts.
+
+	Only submitted receipts linked to the Dossier count. `ignore_receipt` leaves one out, for the
+	receipt being cancelled.
+	"""
+	doc = frappe.get_doc("Dossier Importation", dossier)
+	po_items = [row.purchase_order_item for row in doc.articles if row.purchase_order_item]
+	if not po_items:
+		return
+	company_currency = frappe.get_cached_value("Company", doc.company, "default_currency")
+	receipt = frappe.qb.DocType("Purchase Receipt")
+	item = frappe.qb.DocType("Purchase Receipt Item")
+	query = (
+		frappe.qb.from_(item)
+		.join(receipt)
+		.on(item.parent == receipt.name)
+		.select(
+			item.purchase_order_item,
+			item.qty,
+			receipt.name.as_("receipt"),
+			receipt.conversion_rate,
+		)
+		.where(
+			(receipt.docstatus == 1)
+			& (receipt.dossier_importation == dossier)
+			& (item.purchase_order_item.isin(po_items))
+		)
+		.orderby(receipt.posting_date)
+		.orderby(receipt.creation)
+	)
+	if ignore_receipt:
+		query = query.where(receipt.name != ignore_receipt)
+	received: dict[str, list] = {}
+	for entry in query.run(as_dict=True):
+		received.setdefault(entry.purchase_order_item, []).append(entry)
+	order_rates = dict(
+		frappe.get_all(
+			"Purchase Order",
+			filters={"name": ("in", list({row.purchase_order for row in doc.articles}))},
+			fields=["name", "conversion_rate"],
+			as_list=True,
+		)
+	)
+	for row in doc.articles:
+		entries = received.get(row.purchase_order_item, [])
+		row.received_qty = sum(flt(entry.qty) for entry in entries)
+		# available_qty reads the stored rows: they must agree with the receipts before validate
+		frappe.db.set_value(row.doctype, row.name, "received_qty", row.received_qty, update_modified=False)
+		row.purchase_receipt = entries[-1].receipt if entries else None
+		if row.currency != company_currency:
+			row.exchange_rate = (
+				flt(entries[-1].conversion_rate) if entries else flt(order_rates.get(row.purchase_order))
+			)
+	doc.save(ignore_permissions=True)
+
+
+def receipt_on_submit(doc, method=None) -> None:
+	if doc.get("dossier_importation"):
+		refresh_from_receipts(doc.dossier_importation)
+
+
+def receipt_on_cancel(doc, method=None) -> None:
+	if doc.get("dossier_importation"):
+		refresh_from_receipts(doc.dossier_importation, ignore_receipt=doc.name)

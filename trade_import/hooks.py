@@ -198,8 +198,14 @@ doc_events = {
 		"on_cancel": "trade_import.stock_comptable.on_cancel_delivery_note",
 	},
 	"Purchase Receipt": {
-		"on_submit": "trade_import.stock_comptable.on_submit_stock_voucher",
-		"on_cancel": "trade_import.stock_comptable.on_cancel_stock_voucher",
+		"on_submit": [
+			"trade_import.stock_comptable.on_submit_stock_voucher",
+			"trade_import.dossier_flow.receipt_on_submit",
+		],
+		"on_cancel": [
+			"trade_import.stock_comptable.on_cancel_stock_voucher",
+			"trade_import.dossier_flow.receipt_on_cancel",
+		],
 	},
 	"Stock Entry": {
 		"on_submit": "trade_import.stock_comptable.on_submit_stock_voucher",
