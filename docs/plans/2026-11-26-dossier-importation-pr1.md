@@ -66,7 +66,11 @@ def receipt_on_cancel(doc, method=None) -> None
 
 ---
 
-### Task 1: Custom Fields and the fixtures hook
+### Tasks 1 and 2 (one task: one implementer, one review): Custom Fields, fixtures hook and the two DocTypes
+
+> The Custom Fields link to the DocType that Task 2 creates, so neither can migrate alone. Do the steps of Task 1, then Task 2, then run both sets of tests and commit once as Step 6 says.
+
+#### Part 1: Custom Fields and the fixtures hook
 
 **Files:**
 - Create: `apps/trade_import/trade_import/fixtures/custom_field.json`
@@ -157,7 +161,7 @@ Expected: PASS (2 tests).
 
 ---
 
-### Task 2: The two DocTypes
+#### Part 2: The two DocTypes
 
 **Files:**
 - Create: `apps/trade_import/trade_import/trade_import/doctype/dossier_importation/__init__.py` (empty)
@@ -580,99 +584,45 @@ Co-Authored-By: Claude Sonnet 5.5 <noreply@anthropic.com>"
 - [ ] **Step 1: Write the failing tests** (append)
 
 ```python
-from unittest.mock import patch
-
-from frappe.utils import add_days, flt, nowdate
+from frappe.utils import flt, nowdate
 
 from trade_import import dossier_flow as flow
-from trade_import import foreign_payables
-
-SAVEPOINT = "test_dossier_flow"
 
 
-def make_supplier(name, currency):
-	if not frappe.db.exists("Supplier", name):
-		frappe.get_doc(
-			{
-				"doctype": "Supplier",
-				"supplier_name": name,
-				"supplier_group": frappe.db.get_value("Supplier Group", {"is_group": 0}, "name")
-				or frappe.get_doc({"doctype": "Supplier Group", "supplier_group_name": "_Test DI Group"})
-				.insert(ignore_permissions=True)
-				.name,
-				"default_currency": currency,
-			}
-		).insert(ignore_permissions=True)
-	return name
-
-
-def make_order(supplier, currency, rate, qty, price, item_code, warehouse, company):
-	for code in {currency}:
-		if not frappe.db.exists("Currency", code):
-			frappe.get_doc({"doctype": "Currency", "currency_name": code, "enabled": 1}).insert(
-				ignore_permissions=True
-			)
-	order = frappe.get_doc(
-		{
-			"doctype": "Purchase Order",
-			"supplier": supplier,
-			"company": company,
-			"currency": currency,
-			"conversion_rate": rate,
-			"schedule_date": add_days(nowdate(), 10),
-			"items": [
-				{
-					"item_code": item_code,
-					"qty": qty,
-					"rate": price,
-					"warehouse": warehouse,
-					"schedule_date": add_days(nowdate(), 10),
-				}
-			],
-		}
-	).insert()
-	order.submit()
-	return order
-
-
-class DossierTestCase(IntegrationTestCase):
+class TestDossierValidation(IntegrationTestCase):
 	def setUp(self):
 		super().setUp()
-		frappe.db.savepoint(SAVEPOINT)
-		patcher = patch.object(foreign_payables, "get_configured_currencies", return_value=[])
-		patcher.start()
-		self.addCleanup(patcher.stop)
-		(
-			self.company,
-			self.company_currency,
-			_,
-			self.warehouse,
-			self.item_code,
-			_,
-		) = _ensure_test_master_data()
-		self.supplier_a = make_supplier("_Test DI Supplier A", "EUR")
-		self.supplier_b = make_supplier("_Test DI Supplier B", "USD")
+		frappe.db.savepoint("test_dossier_validation")
+		self.company, _, _, _, self.item_code, _ = _ensure_test_master_data()
+		if not frappe.db.exists("Currency", "EUR"):
+			frappe.get_doc({"doctype": "Currency", "currency_name": "EUR", "enabled": 1}).insert(
+				ignore_permissions=True
+			)
 
 	def tearDown(self):
-		frappe.db.rollback(save_point=SAVEPOINT)
+		frappe.db.rollback(save_point="test_dossier_validation")
 		super().tearDown()
 
-	def order(self, supplier="_Test DI Supplier A", currency="EUR", rate=10.8, qty=100, price=2.5):
-		return make_order(supplier, currency, rate, qty, price, self.item_code, self.warehouse, self.company)
-
-	def dossier(self, **fields):
-		return frappe.get_doc({"doctype": "Dossier Importation", "company": self.company, **fields}).insert()
-
-
-class TestDossierValidation(DossierTestCase):
-	def add(self, dossier, order):
-		flow.add_order_lines(dossier.name, [order.items[0].name])
-		dossier.reload()
-		return dossier.articles[-1]
+	def dossier(self, **row_fields):
+		"""A Dossier with one line built by hand: 100 x 2.5 EUR at 10.8, no purchase order."""
+		dossier = frappe.get_doc({"doctype": "Dossier Importation", "company": self.company})
+		dossier.append(
+			"articles",
+			{
+				"item_code": self.item_code,
+				"qty": 100,
+				"rate": 2.5,
+				"currency": "EUR",
+				"exchange_rate": 10.8,
+				"conversion_factor": 1,
+				**row_fields,
+			},
+		)
+		return dossier.insert()
 
 	def test_line_values_in_the_company_currency(self):
 		dossier = self.dossier()
-		row = self.add(dossier, self.order())  # 100 x 2.5 EUR at 10.8
+		row = dossier.articles[0]
 		self.assertEqual(flt(row.stock_qty), 100)
 		self.assertEqual(flt(row.amount), 250)
 		self.assertEqual(flt(row.valeur_mad), 2700)
@@ -683,7 +633,7 @@ class TestDossierValidation(DossierTestCase):
 			"Item", self.item_code, {"weight_per_unit": 1.5, "weight_uom": "Kg", "volume_par_unite": 0.002}
 		)
 		dossier = self.dossier()
-		row = self.add(dossier, self.order())
+		row = dossier.articles[0]
 		self.assertEqual(flt(row.poids_kg), 150)
 		self.assertEqual(flt(row.volume_m3, 6), 0.2)
 		self.assertEqual(row.source_colisage, flow.FROM_ITEM)
@@ -691,17 +641,14 @@ class TestDossierValidation(DossierTestCase):
 
 	def test_values_from_the_packing_list_are_kept(self):
 		frappe.db.set_value("Item", self.item_code, {"weight_per_unit": 1.5, "weight_uom": "Kg"})
-		dossier = self.dossier()
-		self.add(dossier, self.order())
-		dossier.articles[0].poids_kg = 130
-		dossier.save()
+		dossier = self.dossier(poids_kg=130)
 		self.assertEqual(flt(dossier.articles[0].poids_kg), 130)
 		self.assertEqual(dossier.articles[0].source_colisage, flow.FROM_LIST)
 
 	def test_status_follows_the_dates(self):
-		dossier = self.dossier()
+		dossier = frappe.get_doc({"doctype": "Dossier Importation", "company": self.company}).insert()
 		self.assertEqual(dossier.status, flow.STATUS_DRAFT)
-		self.add(dossier, self.order())
+		dossier = self.dossier()
 		self.assertEqual(dossier.status, flow.STATUS_ORDERED)
 		dossier.date_depart_reelle = nowdate()
 		dossier.save()
@@ -711,7 +658,7 @@ class TestDossierValidation(DossierTestCase):
 		self.assertEqual(dossier.status, flow.STATUS_IN_CUSTOMS)
 ```
 
-(These tests use `flow.add_order_lines`, built in Task 5; they fail on that until then, which is expected: Task 4's own check is Step 4 below, which runs only the tests that do not need Task 5.)
+Each test builds its lines by hand, so none needs a purchase order (those come in Task 5).
 
 - [ ] **Step 2: Write the implementation** — append to `trade_import/dossier_flow.py`:
 
@@ -805,12 +752,13 @@ from frappe.utils import flt
 
 and delete the two `# noqa: E402` lines and the section comment's import lines from the appended block. (`_` is used from Task 5 on; ruff will not flag it once Task 5 lands, so if `ruff` complains about the unused import now, add it in Task 5 instead.)
 
-- [ ] **Step 4: Run what can run now**
+- [ ] **Step 4: Run the tests**
 
 ```bash
 $BENCH 'cd frappe-bench && bench --site generic.localhost run-tests --module trade_import.tests.test_dossier_flow'
+$BENCH 'cd frappe-bench && bench --site generic.localhost run-tests --module trade_import.tests.test_dossier_importation'
 ```
-Expected: PASS (13 tests). The `TestDossierValidation` tests run after Task 5.
+Expected: PASS (13 tests, then 8: the 4 from Tasks 1 and 2 plus these 4).
 
 - [ ] **Step 5: Commit**
 
@@ -835,6 +783,95 @@ Co-Authored-By: Claude Sonnet 5.5 <noreply@anthropic.com>"
 - Produces: `available_qty`, `get_open_order_lines`, `add_order_lines`, `check_lines(doc)`.
 
 - [ ] **Step 1: Write the failing tests** (append)
+
+First the shared helpers (Task 5 is the first task that needs purchase orders):
+
+```python
+from unittest.mock import patch
+
+from frappe.utils import add_days, flt, nowdate
+
+from trade_import import dossier_flow as flow
+from trade_import import foreign_payables
+
+SAVEPOINT = "test_dossier_flow"
+
+
+def make_supplier(name, currency):
+	if not frappe.db.exists("Supplier", name):
+		frappe.get_doc(
+			{
+				"doctype": "Supplier",
+				"supplier_name": name,
+				"supplier_group": frappe.db.get_value("Supplier Group", {"is_group": 0}, "name")
+				or frappe.get_doc({"doctype": "Supplier Group", "supplier_group_name": "_Test DI Group"})
+				.insert(ignore_permissions=True)
+				.name,
+				"default_currency": currency,
+			}
+		).insert(ignore_permissions=True)
+	return name
+
+
+def make_order(supplier, currency, rate, qty, price, item_code, warehouse, company):
+	for code in {currency}:
+		if not frappe.db.exists("Currency", code):
+			frappe.get_doc({"doctype": "Currency", "currency_name": code, "enabled": 1}).insert(
+				ignore_permissions=True
+			)
+	order = frappe.get_doc(
+		{
+			"doctype": "Purchase Order",
+			"supplier": supplier,
+			"company": company,
+			"currency": currency,
+			"conversion_rate": rate,
+			"schedule_date": add_days(nowdate(), 10),
+			"items": [
+				{
+					"item_code": item_code,
+					"qty": qty,
+					"rate": price,
+					"warehouse": warehouse,
+					"schedule_date": add_days(nowdate(), 10),
+				}
+			],
+		}
+	).insert()
+	order.submit()
+	return order
+
+
+class DossierTestCase(IntegrationTestCase):
+	def setUp(self):
+		super().setUp()
+		frappe.db.savepoint(SAVEPOINT)
+		patcher = patch.object(foreign_payables, "get_configured_currencies", return_value=[])
+		patcher.start()
+		self.addCleanup(patcher.stop)
+		(
+			self.company,
+			self.company_currency,
+			_,
+			self.warehouse,
+			self.item_code,
+			_,
+		) = _ensure_test_master_data()
+		self.supplier_a = make_supplier("_Test DI Supplier A", "EUR")
+		self.supplier_b = make_supplier("_Test DI Supplier B", "USD")
+
+	def tearDown(self):
+		frappe.db.rollback(save_point=SAVEPOINT)
+		super().tearDown()
+
+	def order(self, supplier="_Test DI Supplier A", currency="EUR", rate=10.8, qty=100, price=2.5):
+		return make_order(supplier, currency, rate, qty, price, self.item_code, self.warehouse, self.company)
+
+	def dossier(self, **fields):
+		return frappe.get_doc({"doctype": "Dossier Importation", "company": self.company, **fields}).insert()
+
+
+Then the tests:
 
 ```python
 class TestOrderLines(DossierTestCase):
