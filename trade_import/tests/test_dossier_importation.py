@@ -19,6 +19,10 @@ class TestDossierCustomFields(IntegrationTestCase):
 			self.assertIsNotNone(field, doctype)
 			self.assertEqual(field.options, "Dossier Importation", doctype)
 
+	def test_dossier_links_are_indexed(self):
+		for doctype in LINKED:
+			self.assertTrue(frappe.get_meta(doctype).get_field("dossier_importation").search_index, doctype)
+
 	def test_item_has_a_unit_volume(self):
 		field = frappe.get_meta("Item").get_field("volume_par_unite")
 		self.assertIsNotNone(field)
@@ -46,26 +50,97 @@ class TestDossierDocType(IntegrationTestCase):
 		self.assertTrue(frappe.get_meta("Dossier Importation Article").istable)
 
 
-class TestDossierValidation(IntegrationTestCase):
-	def setUp(self):
-		super().setUp()
-		frappe.db.savepoint("test_dossier_validation")
-		self.company, _, _, _, self.item_code, _ = _ensure_test_master_data()
-		if not frappe.db.exists("Currency", "EUR"):
-			frappe.get_doc({"doctype": "Currency", "currency_name": "EUR", "enabled": 1}).insert(
+def make_supplier(name, currency):
+	if not frappe.db.exists("Supplier", name):
+		frappe.get_doc(
+			{
+				"doctype": "Supplier",
+				"supplier_name": name,
+				"supplier_group": frappe.db.get_value("Supplier Group", {"is_group": 0}, "name")
+				or frappe.get_doc({"doctype": "Supplier Group", "supplier_group_name": "_Test DI Group"})
+				.insert(ignore_permissions=True)
+				.name,
+				"default_currency": currency,
+			}
+		).insert(ignore_permissions=True)
+	return name
+
+
+def make_order(supplier, currency, rate, qty, price, item_code, warehouse, company, **header):
+	for code in {currency}:
+		if not frappe.db.exists("Currency", code):
+			frappe.get_doc({"doctype": "Currency", "currency_name": code, "enabled": 1}).insert(
 				ignore_permissions=True
 			)
+	order = frappe.get_doc(
+		{
+			"doctype": "Purchase Order",
+			"supplier": supplier,
+			"company": company,
+			"currency": currency,
+			"conversion_rate": rate,
+			"schedule_date": add_days(nowdate(), 10),
+			"items": [
+				{
+					"item_code": item_code,
+					"qty": qty,
+					"rate": price,
+					"warehouse": warehouse,
+					"schedule_date": add_days(nowdate(), 10),
+				}
+			],
+			**header,
+		}
+	).insert()
+	order.submit()
+	return order
+
+
+class DossierTestCase(IntegrationTestCase):
+	def setUp(self):
+		super().setUp()
+		frappe.db.savepoint(SAVEPOINT)
+		patcher = patch.object(foreign_payables, "get_configured_currencies", return_value=[])
+		patcher.start()
+		self.addCleanup(patcher.stop)
+		(
+			self.company,
+			self.company_currency,
+			_,
+			self.warehouse,
+			self.item_code,
+			_,
+		) = _ensure_test_master_data()
+		self.supplier_a = make_supplier("_Test DI Supplier A", "EUR")
+		self.supplier_b = make_supplier("_Test DI Supplier B", "USD")
 
 	def tearDown(self):
-		frappe.db.rollback(save_point="test_dossier_validation")
+		frappe.db.rollback(save_point=SAVEPOINT)
 		super().tearDown()
 
+	def order(self, supplier="_Test DI Supplier A", currency="EUR", rate=10.8, qty=100, price=2.5, **header):
+		return make_order(
+			supplier, currency, rate, qty, price, self.item_code, self.warehouse, self.company, **header
+		)
+
+	def dossier(self, **fields):
+		return frappe.get_doc({"doctype": "Dossier Importation", "company": self.company, **fields}).insert()
+
+
+class TestDossierValidation(DossierTestCase):
+	def setUp(self):
+		super().setUp()
+		self.order_doc = self.order(qty=1000, price=2.5)
+
 	def dossier(self, **row_fields):
-		"""A Dossier with one line built by hand: 100 x 2.5 EUR at 10.8, no purchase order."""
+		"""A Dossier with one line built by hand: 100 x 2.5 EUR at 10.8, on a real order line."""
+		line = self.order_doc.items[0]
 		dossier = frappe.get_doc({"doctype": "Dossier Importation", "company": self.company})
 		dossier.append(
 			"articles",
 			{
+				"purchase_order": self.order_doc.name,
+				"purchase_order_item": line.name,
 				"item_code": self.item_code,
 				"qty": 100,
 				"rate": 2.5,
@@ -141,79 +216,42 @@ class TestDossierValidation(IntegrationTestCase):
 		self.assertEqual(flt(row.exchange_rate), 1)
 		self.assertEqual(flt(row.valeur_mad), flt(row.amount))
 
+	def test_a_row_without_an_order_line_is_refused(self):
+		with self.assertRaisesRegex(frappe.ValidationError, "ligne de commande est requise"):
+			self.dossier(purchase_order=None, purchase_order_item=None)
 
-def make_supplier(name, currency):
-	if not frappe.db.exists("Supplier", name):
-		frappe.get_doc(
-			{
-				"doctype": "Supplier",
-				"supplier_name": name,
-				"supplier_group": frappe.db.get_value("Supplier Group", {"is_group": 0}, "name")
-				or frappe.get_doc({"doctype": "Supplier Group", "supplier_group_name": "_Test DI Group"})
-				.insert(ignore_permissions=True)
-				.name,
-				"default_currency": currency,
-			}
-		).insert(ignore_permissions=True)
-	return name
+	def test_a_zero_or_negative_quantity_is_refused(self):
+		for qty in (0, -5):
+			with self.assertRaisesRegex(frappe.ValidationError, "quantité doit être positive"):
+				self.dossier(qty=qty)
 
+	def test_a_quantity_below_the_received_quantity_is_refused(self):
+		dossier = self.dossier(qty=100)
+		frappe.db.set_value("Dossier Importation Article", dossier.articles[0].name, "received_qty", 50)
+		dossier.reload()
+		dossier.articles[0].qty = 30
+		with self.assertRaisesRegex(frappe.ValidationError, "inférieure à la quantité reçue"):
+			dossier.save()
 
-def make_order(supplier, currency, rate, qty, price, item_code, warehouse, company):
-	for code in {currency}:
-		if not frappe.db.exists("Currency", code):
-			frappe.get_doc({"doctype": "Currency", "currency_name": code, "enabled": 1}).insert(
-				ignore_permissions=True
-			)
-	order = frappe.get_doc(
-		{
-			"doctype": "Purchase Order",
-			"supplier": supplier,
-			"company": company,
-			"currency": currency,
-			"conversion_rate": rate,
-			"schedule_date": add_days(nowdate(), 10),
-			"items": [
-				{
-					"item_code": item_code,
-					"qty": qty,
-					"rate": price,
-					"warehouse": warehouse,
-					"schedule_date": add_days(nowdate(), 10),
-				}
-			],
-		}
-	).insert()
-	order.submit()
-	return order
+	def test_a_received_quantity_above_the_line_counts_in_full(self):
+		dossier = self.dossier(qty=100)
+		row = dossier.articles[0]
+		frappe.db.set_value(
+			"Dossier Importation Article", row.name, {"qty": 30, "received_qty": 50}
+		)  # over-receipt, skips validate
+		line = row.purchase_order_item
+		# order 1000: 50 taken (the received quantity outweighs the 30)
+		self.assertEqual(flt(flow.available_qty([line])[line]), 950)
 
-
-class DossierTestCase(IntegrationTestCase):
-	def setUp(self):
-		super().setUp()
-		frappe.db.savepoint(SAVEPOINT)
-		patcher = patch.object(foreign_payables, "get_configured_currencies", return_value=[])
-		patcher.start()
-		self.addCleanup(patcher.stop)
-		(
-			self.company,
-			self.company_currency,
-			_,
-			self.warehouse,
-			self.item_code,
-			_,
-		) = _ensure_test_master_data()
-		self.supplier_a = make_supplier("_Test DI Supplier A", "EUR")
-		self.supplier_b = make_supplier("_Test DI Supplier B", "USD")
-
-	def tearDown(self):
-		frappe.db.rollback(save_point=SAVEPOINT)
-		super().tearDown()
-
-	def order(self, supplier="_Test DI Supplier A", currency="EUR", rate=10.8, qty=100, price=2.5):
-		return make_order(supplier, currency, rate, qty, price, self.item_code, self.warehouse, self.company)
-
-	def dossier(self, **fields):
-		return frappe.get_doc({"doctype": "Dossier Importation", "company": self.company, **fields}).insert()
+	def test_the_value_follows_the_net_price_of_the_order(self):
+		order = self.order(qty=100, price=2.5, additional_discount_percentage=10)
+		line = order.items[0]
+		self.assertEqual(flt(line.net_rate, 4), 2.25)
+		dossier = frappe.get_doc({"doctype": "Dossier Importation", "company": self.company}).insert()
+		flow.add_order_lines(dossier.name, [line.name])
+		dossier.reload()
+		self.assertEqual(flt(dossier.articles[0].rate, 4), 2.25)
+		self.assertEqual(flt(dossier.articles[0].valeur_mad), 2430)
 
 
 class TestOrderLines(DossierTestCase):
@@ -271,14 +309,93 @@ class TestOrderLines(DossierTestCase):
 		second.reload()
 		self.assertEqual(flt(second.articles[0].qty), 40)
 
+	def test_a_lowered_line_added_again_raises_the_same_row(self):
+		order = self.order(qty=100)
+		line = order.items[0].name
+		dossier = self.dossier()
+		flow.add_order_lines(dossier.name, [line])
+		dossier.reload()
+		dossier.articles[0].qty = 60
+		dossier.save()
+		flow.add_order_lines(dossier.name, [line])
+		dossier.reload()
+		self.assertEqual(len(dossier.articles), 1)
+		self.assertEqual(flt(dossier.articles[0].qty), 100)
+
+	def test_the_same_name_twice_adds_one_row(self):
+		order = self.order()
+		line = order.items[0].name
+		dossier = self.dossier()
+		flow.add_order_lines(dossier.name, [line, line])
+		dossier.reload()
+		self.assertEqual(len(dossier.articles), 1)
+		self.assertEqual(flt(dossier.articles[0].qty), 100)
+
+	def test_non_stock_items_are_not_listed(self):
+		item_group, uom = frappe.db.get_value("Item", self.item_code, ["item_group", "stock_uom"])
+		if not frappe.db.exists("Item", "_Test DI Service"):
+			frappe.get_doc(
+				{
+					"doctype": "Item",
+					"item_code": "_Test DI Service",
+					"item_group": item_group,
+					"stock_uom": uom,
+					"is_stock_item": 0,
+				}
+			).insert(ignore_permissions=True)
+		service = make_order(
+			self.supplier_a, "EUR", 10.8, 10, 2.5, "_Test DI Service", self.warehouse, self.company
+		)
+		stock = self.order()
+		names = {l["purchase_order"] for l in flow.get_open_order_lines(self.company)}
+		self.assertIn(stock.name, names)
+		self.assertNotIn(service.name, names)
+
+	def test_drop_ship_lines_and_subcontracted_orders_are_not_listed(self):
+		drop_ship, subcontracted, normal = self.order(), self.order(), self.order()
+		frappe.db.set_value("Purchase Order Item", drop_ship.items[0].name, "delivered_by_supplier", 1)
+		frappe.db.set_value("Purchase Order", subcontracted.name, "is_subcontracted", 1)
+		names = {l["purchase_order"] for l in flow.get_open_order_lines(self.company)}
+		self.assertIn(normal.name, names)
+		self.assertNotIn(drop_ship.name, names)
+		self.assertNotIn(subcontracted.name, names)
+
+	def test_a_user_only_sees_the_orders_they_may_read(self):
+		a, b = self.order(), self.order("_Test DI Supplier B", "USD", 9.9)
+		email = "_test_di_user@example.com"
+		if not frappe.db.exists("User", email):
+			frappe.get_doc(
+				{
+					"doctype": "User",
+					"email": email,
+					"first_name": "Test DI",
+					"send_welcome_email": 0,
+					"roles": [{"role": "Purchase User"}],
+				}
+			).insert(ignore_permissions=True)
+		frappe.get_doc(
+			{"doctype": "User Permission", "user": email, "allow": "Supplier", "for_value": self.supplier_a}
+		).insert(ignore_permissions=True)
+		admin = frappe.session.user
+		frappe.set_user(email)
+		try:
+			names = {l["purchase_order"] for l in flow.get_open_order_lines(self.company)}
+		finally:
+			frappe.set_user(admin)
+		self.assertIn(a.name, names)
+		self.assertNotIn(b.name, names)
+
 	def test_a_line_cannot_be_over_allocated(self):
 		order = self.order(qty=100)
 		dossier = self.dossier()
 		flow.add_order_lines(dossier.name, [order.items[0].name])
 		dossier.reload()
 		dossier.articles[0].qty = 150
-		with self.assertRaisesRegex(frappe.ValidationError, "dépasse"):
+		with self.assertRaisesRegex(frappe.ValidationError, "dépasse") as ctx:
 			dossier.save()
+		self.assertIn(order.name, str(ctx.exception))
+		self.assertIn(self.item_code, str(ctx.exception))
+		self.assertNotIn(order.items[0].name, str(ctx.exception))
 
 	def test_every_line_must_belong_to_the_dossier_company(self):
 		order = self.order()
@@ -368,7 +485,15 @@ class TestOrderLineGuards(DossierTestCase):
 		order = self.order()
 		dossier = self.dossier()
 		dossier.append("articles", self.row_for(order, purchase_order_item="does-not-exist"))
-		with self.assertRaises(frappe.ValidationError):
+		with self.assertRaisesRegex(frappe.ValidationError, "n'existe pas"):
+			dossier.save()
+
+	def test_the_same_order_line_on_two_rows_is_refused(self):
+		order = self.order()
+		dossier = self.dossier()
+		dossier.append("articles", self.row_for(order, qty=50))
+		dossier.append("articles", self.row_for(order, qty=50))
+		with self.assertRaisesRegex(frappe.ValidationError, "figure sur les lignes 1 et 2"):
 			dossier.save()
 
 
@@ -400,7 +525,7 @@ class TestReceivedOutsideDossiers(DossierTestCase):
 		self.assertEqual(self.listed(order), [])
 
 	def test_closed_and_on_hold_orders_are_not_listed(self):
-		for status in ("Closed", "On Hold"):
+		for status in ("Closed", "On Hold", "Delivered"):
 			order = self.order()
 			self.assertEqual(len(self.listed(order)), 1)
 			frappe.db.set_value("Purchase Order", order.name, "status", status)
@@ -427,16 +552,36 @@ class TestReceipts(DossierTestCase):
 		dossier.reload()
 		return dossier
 
-	def test_one_draft_receipt_per_supplier_and_currency(self):
-		a1, a2 = self.order(), self.order(qty=40)
+	def test_one_draft_receipt_per_order(self):
+		a1, a2 = self.order(), self.order(qty=40, rate=10.9)
 		b = self.order("_Test DI Supplier B", "USD", 9.9)
 		dossier = self.loaded(a1, a2, b)
 		names = flow.create_receipts(dossier.name)
-		self.assertEqual(len(names), 2)
-		receipts = [frappe.get_doc("Purchase Receipt", n) for n in names]
-		self.assertEqual({r.docstatus for r in receipts}, {0})
-		self.assertEqual({r.dossier_importation for r in receipts}, {dossier.name})
-		self.assertEqual(sorted(len(r.items) for r in receipts), [1, 2])
+		self.assertEqual(len(names), 3)
+		by_order = {}
+		for name in names:
+			receipt = frappe.get_doc("Purchase Receipt", name)
+			self.assertEqual(receipt.docstatus, 0)
+			self.assertEqual(receipt.dossier_importation, dossier.name)
+			self.assertEqual(len(receipt.items), 1)
+			by_order[receipt.items[0].purchase_order] = receipt
+		self.assertEqual(set(by_order), {a1.name, a2.name, b.name})
+		for order, qty, rate in ((a1, 100, 10.8), (a2, 40, 10.9), (b, 100, 9.9)):
+			receipt = by_order[order.name]
+			self.assertEqual(receipt.items[0].purchase_order_item, order.items[0].name)
+			self.assertEqual(flt(receipt.items[0].qty), qty)
+			self.assertEqual(flt(receipt.conversion_rate), rate)
+
+	def test_each_receipt_keeps_the_rate_and_discount_of_its_own_order(self):
+		first = self.order(qty=100, rate=10.8, additional_discount_percentage=5)
+		second = self.order(qty=40, rate=10.9)
+		dossier = self.loaded(first, second)
+		receipts = {
+			r.items[0].purchase_order: r
+			for r in (frappe.get_doc("Purchase Receipt", n) for n in flow.create_receipts(dossier.name))
+		}
+		self.assertEqual(flt(receipts[first.name].items[0].base_net_amount, 2), 2565.00)
+		self.assertEqual(flt(receipts[second.name].items[0].base_net_amount, 2), 1090.00)
 
 	def test_the_receipt_takes_the_quantity_of_the_dossier_line(self):
 		order = self.order(qty=100)
@@ -539,8 +684,12 @@ class TestReceipts(DossierTestCase):
 		self.assertEqual(flt(dossier.articles[0].received_qty), 60)
 
 	def test_drafts_and_receipts_of_another_dossier_do_not_count(self):
-		a1, a2 = self.order(), self.order()
-		dossier, other = self.loaded(a1), self.loaded(a2)
+		order = self.order(qty=100)
+		dossier = self.loaded(order)
+		dossier.articles[0].qty = 60
+		dossier.save()
+		other = self.loaded(order)  # takes the remaining 40 of the same order line
+		self.assertEqual(flt(other.articles[0].qty), 40)
 		flow.create_receipts(dossier.name)  # a draft
 		flow.refresh_from_receipts(dossier.name)
 		dossier.reload()
@@ -550,3 +699,48 @@ class TestReceipts(DossierTestCase):
 		dossier.reload()
 		self.assertEqual(flt(dossier.articles[0].received_qty), 0)
 		self.assertFalse(dossier.articles[0].purchase_receipt)
+		other.reload()
+		self.assertEqual(flt(other.articles[0].received_qty), 40)
+
+	def plain_receipt(self, order, qty=None):
+		from erpnext.buying.doctype.purchase_order.purchase_order import make_purchase_receipt
+
+		receipt = make_purchase_receipt(order.name)
+		if qty is not None:
+			receipt.items[0].qty = qty
+		return receipt.insert()
+
+	def test_a_plain_receipt_for_a_dossier_line_gets_the_dossier_link(self):
+		order = self.order(qty=100)
+		dossier = self.loaded(order)
+		receipt = self.plain_receipt(order)
+		self.assertEqual(receipt.dossier_importation, dossier.name)
+		receipt.submit()
+		dossier.reload()
+		self.assertEqual(flt(dossier.articles[0].received_qty), 100)
+		self.assertEqual(dossier.status, flow.STATUS_RECEIVED)
+		dossier.save()
+
+	def test_a_plain_receipt_for_an_untouched_order_stays_free(self):
+		receipt = self.plain_receipt(self.order())
+		self.assertFalse(receipt.dossier_importation)
+
+	def test_a_plain_receipt_for_lines_held_by_two_dossiers_is_refused(self):
+		order = self.order(qty=100)
+		first = self.loaded(order)
+		first.articles[0].qty = 60
+		first.save()
+		self.loaded(order)
+		with self.assertRaisesRegex(frappe.ValidationError, "depuis le dossier"):
+			self.plain_receipt(order)
+
+	def test_a_receipt_naming_another_dossier_is_refused(self):
+		held = self.order()
+		dossier, other = self.loaded(held), self.dossier()
+		receipt = self.plain_receipt(held)
+		self.assertEqual(receipt.dossier_importation, dossier.name)
+		receipt.dossier_importation = other.name
+		with self.assertRaisesRegex(frappe.ValidationError, "depuis le dossier"):
+			receipt.save()
+
+	# Cancelling after the order is Closed is not tested here: ERPNext refuses it before our hook runs.

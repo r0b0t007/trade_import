@@ -151,7 +151,8 @@ def status_of(doc) -> str:
 def available_qty(po_items: list[str], exclude_dossier: str | None = None) -> dict[str, float]:
 	"""Quantity of each purchase order line that no Dossier has taken yet.
 
-	Received outside any Dossier counts as taken; a Dossier line counts in full, received or not.
+	Received outside any Dossier counts as taken; a Dossier line counts in full, received or not (a
+	row whose received quantity exceeds its quantity counts the received quantity).
 	`exclude_dossier` leaves one Dossier's own lines out, to check that Dossier on save.
 	"""
 	if not po_items:
@@ -170,7 +171,7 @@ def available_qty(po_items: list[str], exclude_dossier: str | None = None) -> di
 	for order_row in order_rows:
 		mine = [r for r in dossier_rows if r.purchase_order_item == order_row.name]
 		received_in_dossiers = sum(flt(r.received_qty) for r in mine)
-		taken = sum(flt(r.qty) for r in mine if r.parent != exclude_dossier)
+		taken = sum(max(flt(r.qty), flt(r.received_qty)) for r in mine if r.parent != exclude_dossier)
 		received_outside = max(0, flt(order_row.received_qty) - received_in_dossiers)
 		result[order_row.name] = flt(flt(order_row.qty) - received_outside - taken, 6)
 	return result
@@ -180,8 +181,14 @@ def available_qty(po_items: list[str], exclude_dossier: str | None = None) -> di
 def get_open_order_lines(company: str, supplier: str | None = None) -> list[dict]:
 	"""Purchase order lines still free to put in a Dossier, with the quantity left on each."""
 	frappe.has_permission("Purchase Order", "read", throw=True)
+	readable = frappe.get_list(
+		"Purchase Order", filters={"company": company, "docstatus": 1}, pluck="name", limit_page_length=0
+	)
+	if not readable:
+		return []
 	order = frappe.qb.DocType("Purchase Order")
 	line = frappe.qb.DocType("Purchase Order Item")
+	item = frappe.qb.DocType("Item")
 	query = (
 		frappe.qb.from_(line)
 		.join(order)
@@ -198,13 +205,20 @@ def get_open_order_lines(company: str, supplier: str | None = None) -> list[dict
 			line.uom,
 			line.conversion_factor,
 			line.rate,
+			line.net_rate,
 			line.qty,
 			line.received_qty,
 		)
+		.join(item)
+		.on(line.item_code == item.name)
 		.where(
 			(order.docstatus == 1)
+			& (order.name.isin(readable))
 			& (order.company == company)
-			& (order.status.notin(["Closed", "On Hold", "Completed", "Cancelled"]))
+			& (order.status.notin(["Closed", "On Hold", "Completed", "Delivered", "Cancelled"]))
+			& (order.is_subcontracted == 0)
+			& (line.delivered_by_supplier == 0)
+			& ((item.is_stock_item == 1) | (item.is_fixed_asset == 1))
 			& (line.received_qty < line.qty)
 		)
 		.orderby(order.transaction_date)
@@ -223,15 +237,44 @@ def get_open_order_lines(company: str, supplier: str | None = None) -> list[dict
 
 
 def check_lines(doc) -> None:
-	"""Every line belongs to the company, and no purchase order line is over-allocated."""
-	# The refresh from receipts only changes figures taken from submitted receipts (received quantity,
-	# last receipt, exchange rate), which ERPNext already checks against the order. The guards meant
-	# for user edits must not block a receipt from being submitted or cancelled.
+	"""Every row has an order line of the company and a sound quantity; no order line is over-allocated.
+
+	The `from_receipt_refresh` flag skips all of these user guards (company, parent order, quantities,
+	over-allocation): the refresh changes only figures taken from submitted receipts (received
+	quantity, last receipt, exchange rate), which ERPNext already checks against the order, and it
+	must not block a receipt from being submitted or cancelled.
+	"""
 	if doc.flags.get("from_receipt_refresh"):
 		return
-	rows = [row for row in doc.articles if row.purchase_order_item]
+	for row in doc.articles:
+		code = frappe.bold(row.item_code or "?")
+		if not row.purchase_order_item:
+			frappe.throw(
+				_("Ligne {0} : une ligne de commande est requise (article {1}).").format(row.idx, code)
+			)
+		if flt(row.qty) <= 0:
+			frappe.throw(_("Ligne {0} : la quantité doit être positive (article {1}).").format(row.idx, code))
+		if flt(row.qty, 6) < flt(row.received_qty, 6):
+			frappe.throw(
+				_("Ligne {0} : la quantité est inférieure à la quantité reçue (article {1}).").format(
+					row.idx, code
+				)
+			)
+	rows = list(doc.articles)
 	if not rows:
 		return
+	first_row = {}
+	for row in rows:
+		if row.purchase_order_item in first_row:
+			frappe.throw(
+				_("La ligne de commande {0} (article {1}) figure sur les lignes {2} et {3}.").format(
+					frappe.bold(row.purchase_order_item),
+					frappe.bold(row.item_code or "?"),
+					first_row[row.purchase_order_item].idx,
+					row.idx,
+				)
+			)
+		first_row[row.purchase_order_item] = row
 	parents = dict(
 		frappe.get_all(
 			"Purchase Order Item",
@@ -281,9 +324,16 @@ def check_lines(doc) -> None:
 	left = available_qty(list(wanted), exclude_dossier=None if doc.is_new() else doc.name)
 	for po_item, qty in wanted.items():
 		if flt(qty, 6) > flt(left.get(po_item, 0), 6):
+			row = first_row[po_item]
 			frappe.throw(
-				_("La quantité de la ligne de commande {0} dépasse ce qui reste à expédier ({1}).").format(
-					frappe.bold(po_item), left.get(po_item, 0)
+				_(
+					"La quantité de l'article {0} sur la commande {1} dépasse ce qui reste à expédier ({2})."
+				).format(
+					frappe.bold(row.item_code or "?"),
+					frappe.bold(row.purchase_order),
+					frappe.format_value(
+						flt(left.get(po_item, 0), row.precision("qty")), row.meta.get_field("qty")
+					),
 				)
 			)
 
@@ -295,11 +345,18 @@ def add_order_lines(dossier: str, po_items: list[str] | str) -> None:
 	doc.check_permission("write")
 	if isinstance(po_items, str):
 		po_items = json.loads(po_items)
+	po_items = list(dict.fromkeys(po_items))
 	open_lines = {line.purchase_order_item: line for line in get_open_order_lines(doc.company)}
+	held = {row.purchase_order_item: row for row in doc.articles if row.purchase_order_item}
 	for name in po_items:
 		line = open_lines.get(name)
 		if not line:
 			frappe.throw(_("La ligne {0} n'est plus disponible.").format(frappe.bold(name)))
+		if name in held:
+			# Already in this Dossier with a lowered quantity: give back the quantity left.
+			row = held[name]
+			row.qty = flt(flt(row.qty) + flt(line.qty), row.precision("qty"))
+			continue
 		doc.append(
 			"articles",
 			{
@@ -312,7 +369,7 @@ def add_order_lines(dossier: str, po_items: list[str] | str) -> None:
 				"uom": line.uom,
 				"conversion_factor": line.conversion_factor,
 				"currency": line.currency,
-				"rate": line.rate,
+				"rate": line.net_rate,
 				"exchange_rate": line.conversion_rate,
 			},
 		)
@@ -333,7 +390,11 @@ def add_order_lines(dossier: str, po_items: list[str] | str) -> None:
 
 @frappe.whitelist()
 def create_receipts(dossier: str) -> list[str]:
-	"""Draft purchase receipts for what is not received yet: one per supplier and currency."""
+	"""Draft purchase receipts for what is not received yet: one per purchase order.
+
+	One receipt per order keeps each order's rate, discount and taxes on its own receipt (ERPNext's
+	mapper copies the last order's header over the others on a merged receipt).
+	"""
 	from erpnext.buying.doctype.purchase_order.purchase_order import make_purchase_receipt
 
 	doc = frappe.get_doc("Dossier Importation", dossier)
@@ -345,26 +406,20 @@ def create_receipts(dossier: str) -> list[str]:
 		frappe.throw(
 			_("Un brouillon de réception existe déjà pour ce dossier : {0}.").format(", ".join(drafts))
 		)
-	# (supplier, currency) -> purchase order -> purchase order line -> quantity to receive
-	pending: dict[tuple, dict[str, dict[str, float]]] = {}
+	# purchase order -> purchase order line -> quantity to receive
+	pending: dict[str, dict[str, float]] = {}
 	for row in doc.articles:
-		to_receive = flt(row.qty) - flt(row.received_qty)
+		to_receive = flt(row.qty - row.received_qty, row.precision("qty"))
 		if to_receive > 0 and row.purchase_order_item:
-			orders = pending.setdefault((row.supplier, row.currency), {})
-			orders.setdefault(row.purchase_order, {})[row.purchase_order_item] = to_receive
+			pending.setdefault(row.purchase_order, {})[row.purchase_order_item] = to_receive
 	if not pending:
 		frappe.throw(_("Rien à réceptionner : toutes les lignes sont reçues."))
 	created = []
-	for orders in pending.values():
-		receipt = None
-		for order, lines in orders.items():
-			receipt = make_purchase_receipt(
-				order, target_doc=receipt, args={"filtered_children": list(lines)}
-			)
-		wanted = {name: qty for lines in orders.values() for name, qty in lines.items()}
+	for order, lines in pending.items():
+		receipt = make_purchase_receipt(order, args={"filtered_children": list(lines)})
 		receipt.dossier_importation = doc.name
 		for item in receipt.items:
-			item.qty = wanted[item.purchase_order_item]
+			item.qty = lines[item.purchase_order_item]
 			item.received_qty = item.qty  # nothing rejected: received = accepted
 		receipt.insert()
 		created.append(receipt.name)
@@ -375,7 +430,9 @@ def refresh_from_receipts(dossier: str, ignore_receipt: str | None = None) -> No
 	"""Received quantities, receipt references and rates of the Dossier lines, from the receipts.
 
 	Only submitted receipts linked to the Dossier count. `ignore_receipt` leaves one out, for the
-	receipt being cancelled.
+	receipt being cancelled. Only rows with an order line are touched. The save sets
+	`from_receipt_refresh`, which skips all the user guards of `check_lines` (company, parent,
+	quantities, over-allocation) because the refresh changes only receipt-derived figures.
 	"""
 	doc = frappe.get_doc("Dossier Importation", dossier)
 	po_items = [row.purchase_order_item for row in doc.articles if row.purchase_order_item]
@@ -416,6 +473,8 @@ def refresh_from_receipts(dossier: str, ignore_receipt: str | None = None) -> No
 		)
 	)
 	for row in doc.articles:
+		if not row.purchase_order_item:
+			continue
 		entries = received.get(row.purchase_order_item, [])
 		row.received_qty = sum(flt(entry.qty) for entry in entries)
 		row.purchase_receipt = entries[-1].receipt if entries else None
@@ -435,3 +494,47 @@ def receipt_on_submit(doc, method=None) -> None:
 def receipt_on_cancel(doc, method=None) -> None:
 	if doc.get("dossier_importation"):
 		refresh_from_receipts(doc.dossier_importation, ignore_receipt=doc.name)
+
+
+def link_purchase_document(doc, method=None) -> None:
+	"""A receipt (or stock invoice) for order lines held by a Dossier belongs to that Dossier.
+
+	Without the link, the quantity would count twice: received outside any Dossier and still to ship
+	in the Dossier. Documents with no Dossier line are left alone.
+	"""
+	if doc.doctype == "Purchase Invoice" and not doc.get("update_stock"):
+		return
+	field = "po_detail" if doc.doctype == "Purchase Invoice" else "purchase_order_item"
+	lines = [item.get(field) for item in doc.items if item.get(field)]
+	if not lines:
+		return
+	holders: dict[str, set[str]] = {}
+	for row in frappe.get_all(
+		"Dossier Importation Article",
+		filters={"purchase_order_item": ("in", lines)},
+		fields=["parent", "purchase_order_item"],
+	):
+		holders.setdefault(row.purchase_order_item, set()).add(row.parent)
+	if not holders:
+		return
+	named = doc.get("dossier_importation")
+	if named:
+		# A split line is held by several Dossiers: the named one must hold every line it touches.
+		if any(named not in dossiers for dossiers in holders.values()):
+			frappe.throw(
+				_(
+					"Ce document nomme le dossier {0}, mais des lignes de commande sont dans un autre dossier : "
+					"créez la réception depuis le dossier."
+				).format(frappe.bold(named)),
+				title=_("Dossier d'importation"),
+			)
+		return
+	all_holders = set().union(*holders.values())
+	if len(all_holders) > 1:
+		frappe.throw(
+			_(
+				"Ces lignes de commande sont dans plusieurs dossiers ({0}) : créez la réception depuis le dossier."
+			).format(", ".join(sorted(all_holders))),
+			title=_("Dossier d'importation"),
+		)
+	doc.dossier_importation = next(iter(all_holders))

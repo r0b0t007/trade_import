@@ -1,11 +1,22 @@
 frappe.ui.form.on("Dossier Importation", {
 	refresh(frm) {
 		if (frm.is_new()) return;
+		const open_for_changes =
+			frm.perm[0].write && !["Coûts finalisés", "Clôturé"].includes(frm.doc.status);
+		if (!open_for_changes) return;
 		const group = __("Actions");
-		frm.add_custom_button(__("Récupérer les commandes"), () => show_order_dialog(frm), group);
+		frm.add_custom_button(
+			__("Récupérer les commandes"),
+			() => save_first(frm, () => show_order_dialog(frm)),
+			group
+		);
 		const to_receive = (frm.doc.articles || []).some((row) => row.qty > row.received_qty);
 		if (to_receive) {
-			frm.add_custom_button(__("Créer la réception"), () => create_receipts(frm), group);
+			frm.add_custom_button(
+				__("Créer la réception"),
+				() => save_first(frm, () => create_receipts(frm)),
+				group
+			);
 		}
 	},
 });
@@ -19,6 +30,15 @@ frappe.ui.form.on("Dossier Importation Article", {
 		frappe.model.set_value(cdt, cdn, "source_colisage", "Liste de colisage");
 	},
 });
+
+// The server reads the saved Dossier: save pending edits first, then carry on.
+function save_first(frm, next) {
+	if (frm.is_dirty()) {
+		frm.save().then(next);
+	} else {
+		next();
+	}
+}
 
 function show_order_dialog(frm) {
 	frappe.call({
@@ -37,6 +57,7 @@ function show_order_dialog(frm) {
 					{
 						fieldname: "lines",
 						fieldtype: "Table",
+						label: __("Lignes de commande"),
 						cannot_add_rows: true,
 						cannot_delete_rows: true,
 						in_place_edit: false,
@@ -117,7 +138,9 @@ function create_receipts(frm) {
 		freeze: true,
 		callback: ({ message }) => {
 			frappe.msgprint(
-				__("Réceptions créées en brouillon : {0}", [(message || []).join(", ")])
+				__("Réceptions créées en brouillon : {0}", [
+					(message || []).map((name) => frappe.utils.escape_html(name)).join(", "),
+				])
 			);
 			frm.reload_doc();
 		},
