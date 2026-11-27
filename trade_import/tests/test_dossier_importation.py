@@ -743,4 +743,25 @@ class TestReceipts(DossierTestCase):
 		with self.assertRaisesRegex(frappe.ValidationError, "depuis le dossier"):
 			receipt.save()
 
+	def purchase_return(self, receipt):
+		from erpnext.controllers.sales_and_purchase_return import make_return_doc
+
+		doc = make_return_doc("Purchase Receipt", receipt.name)
+		doc.items[0].qty = -20
+		return doc.insert()  # inserted only: return handling on submit is PR 2
+
+	def test_a_return_is_not_linked_to_a_dossier(self):
+		dossier = self.loaded(self.order(qty=100))
+		receipt = self.submitted_receipt(dossier)
+		self.assertFalse(self.purchase_return(receipt).dossier_importation)
+
+	def test_a_return_for_a_line_held_by_two_dossiers_is_not_refused(self):
+		order = self.order(qty=100)
+		first = self.loaded(order)
+		first.articles[0].qty = 60
+		first.save()
+		self.loaded(order)
+		receipt = self.submitted_receipt(first)
+		self.assertFalse(self.purchase_return(receipt).dossier_importation)
+
 	# Cancelling after the order is Closed is not tested here: ERPNext refuses it before our hook runs.

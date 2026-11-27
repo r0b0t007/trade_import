@@ -499,9 +499,14 @@ def receipt_on_cancel(doc, method=None) -> None:
 def link_purchase_document(doc, method=None) -> None:
 	"""A receipt (or stock invoice) for order lines held by a Dossier belongs to that Dossier.
 
-	Without the link, the quantity would count twice: received outside any Dossier and still to ship
-	in the Dossier. Documents with no Dossier line are left alone.
+	Without the link, a receipt's quantity would count twice: received outside any Dossier and still
+	to ship in the Dossier. The Dossier does not count the quantity of a Purchase Invoice that
+	updates stock yet (PR 2); the link is only set on it. Documents with no Dossier line are left
+	alone.
 	"""
+	# Returns are not linked to a Dossier and never blocked by one; they are handled in PR 2.
+	if doc.get("is_return"):
+		return
 	if doc.doctype == "Purchase Invoice" and not doc.get("update_stock"):
 		return
 	field = "po_detail" if doc.doctype == "Purchase Invoice" else "purchase_order_item"
