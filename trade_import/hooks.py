@@ -10,6 +10,29 @@ app_license = "gpl-3.0"
 
 required_apps = ["erpnext"]
 
+# Fixtures
+# --------
+# Every Desk customization of this app. Export with:
+#   bench --site <site> export-fixtures --app trade_import
+fixtures = [
+	{
+		"dt": "Custom Field",
+		"filters": [
+			[
+				"name",
+				"in",
+				[
+					"Purchase Order-dossier_importation",
+					"Purchase Order Item-dossier_importation",
+					"Purchase Receipt-dossier_importation",
+					"Purchase Invoice-dossier_importation",
+					"Item-volume_par_unite",
+				],
+			]
+		],
+	},
+]
+
 # Each item in the list will be shown as an app in the apps page
 # add_to_apps_screen = [
 # 	{
@@ -175,8 +198,15 @@ doc_events = {
 		"on_cancel": "trade_import.stock_comptable.on_cancel_delivery_note",
 	},
 	"Purchase Receipt": {
-		"on_submit": "trade_import.stock_comptable.on_submit_stock_voucher",
-		"on_cancel": "trade_import.stock_comptable.on_cancel_stock_voucher",
+		"validate": "trade_import.dossier_flow.link_purchase_document",
+		"on_submit": [
+			"trade_import.stock_comptable.on_submit_stock_voucher",
+			"trade_import.dossier_flow.receipt_on_submit",
+		],
+		"on_cancel": [
+			"trade_import.stock_comptable.on_cancel_stock_voucher",
+			"trade_import.dossier_flow.receipt_on_cancel",
+		],
 	},
 	"Stock Entry": {
 		"on_submit": "trade_import.stock_comptable.on_submit_stock_voucher",
@@ -185,6 +215,7 @@ doc_events = {
 	# Other vouchers that move real stock outside the Delivery Note. The mirror reads their
 	# Stock Ledger Entries, so a Purchase Invoice without update stock posts nothing.
 	"Purchase Invoice": {
+		"validate": "trade_import.dossier_flow.link_purchase_document",
 		"on_submit": "trade_import.stock_comptable.on_submit_stock_voucher",
 		"on_cancel": "trade_import.stock_comptable.on_cancel_stock_voucher",
 	},
