@@ -45,11 +45,11 @@ One document per shipment (one container or air consignment) that the import tea
 - **Purchase links:** purchase order, purchase order item (Data, the PO Item row), supplier, item, description.
 - **Quantity:** qty, UOM, stock qty, conversion factor.
 - **Value:**
-  - currency, unit price, exchange rate (from the order);
+  - currency, unit price (the order line's **net** price, after discounts, as ERPNext values stock), exchange rate (from the order);
   - amount in the order currency;
   - **value in MAD**: the company currency, at the order's rate until the receipt, then at the receipt's rate.
-- **Packing list:** gross weight (kg) and volume (m³). When empty, filled from the item card × stock qty, with a "source" flag (Liste de colisage / Fiche article).
-- **Receipt:** received qty, purchase receipt, purchase receipt item.
+- **Packing list:** gross weight (kg) and volume (m³). When empty, filled from the item card × stock qty, with a "source" flag (Liste de colisage / Fiche article). A figure typed on a line marked "Fiche article" turns it into "Liste de colisage"; an unedited "Fiche article" line follows the item card again at every save. The item card's unit weight is used only when it is in kilograms (or has no unit).
+- **Receipt:** received qty and the last receipt. A line received in several receipts shows the total and the last one; the receipts themselves are found from the Purchase Receipt Item rows. (PR 2 adds one row per receipt item, with its own value, for cost splits.)
 - **Cost results** (read-only):
   - estimated and actual cost share;
   - landed cost per stock unit, estimated and actual.
@@ -98,20 +98,22 @@ The steps are: Brouillon → Commandé → En transit → En dédouanement → R
 | Clôturé | Set by hand. Allowed only from "Coûts finalisés", with no linked document left in draft. |
 
 - The status is computed on save from the dates and the linked documents.
-- A user can move it back by hand, except to "Clôturé", whose rule above always applies.
+- The status is always computed, so nothing is moved by hand. A finalised or closed Dossier keeps its status (set by the cost step and by closing, in later PRs).
 - Cancelling a linked Landed Cost Voucher sends the status back to "Réceptionné".
 
 ## Flows
 
 ### 1. Récupérer les commandes
 
-- A dialog lists the open purchase order lines: submitted orders, not fully received, not already in another Dossier for the same quantity.
+- A dialog lists the open purchase order lines: submitted orders the user may read, not fully received, not already in another Dossier for the same quantity. Drop-ship lines, subcontracted orders and non-stock items are not listed.
+- A line can be in one Dossier row only; adding it again raises that row's quantity. A row's quantity must be above zero and not below what is received.
 - It filters by supplier and company.
-- The chosen lines become Article rows, and the order and order lines get the Dossier link.
+- The chosen lines become Article rows, and the order and order lines get the Dossier link (the latest Dossier that took the line; the Article rows are the record).
+- A purchase receipt, or a purchase invoice that updates stock, made outside the Dossier for a line a Dossier holds gets that Dossier's link automatically; if several Dossiers hold the lines it is refused.
 
 ### 2. Créer la réception
 
-- One Purchase Receipt per supplier, from the Article rows not yet received, using ERPNext's mapper from the order.
+- One draft Purchase Receipt **per purchase order**, from the Article rows not yet received, using ERPNext's mapper from the order. Orders are not merged into one receipt: the mapper copies the last order's exchange rate, discount and taxes onto the whole receipt, which would mis-value stock.
 - Each receipt carries the Dossier link, and saves as a draft for the user to check and submit.
 - On submit of a receipt linked to a Dossier, a doc_event updates the received qty, the receipt references, the value in MAD at the receipt rate, and the status.
 
