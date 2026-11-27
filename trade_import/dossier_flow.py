@@ -224,6 +224,11 @@ def get_open_order_lines(company: str, supplier: str | None = None) -> list[dict
 
 def check_lines(doc) -> None:
 	"""Every line belongs to the company, and no purchase order line is over-allocated."""
+	# The refresh from receipts only changes figures taken from submitted receipts (received quantity,
+	# last receipt, exchange rate), which ERPNext already checks against the order. The guards meant
+	# for user edits must not block a receipt from being submitted or cancelled.
+	if doc.flags.get("from_receipt_refresh"):
+		return
 	rows = [row for row in doc.articles if row.purchase_order_item]
 	if not rows:
 		return
@@ -413,13 +418,12 @@ def refresh_from_receipts(dossier: str, ignore_receipt: str | None = None) -> No
 	for row in doc.articles:
 		entries = received.get(row.purchase_order_item, [])
 		row.received_qty = sum(flt(entry.qty) for entry in entries)
-		# available_qty reads the stored rows: they must agree with the receipts before validate
-		frappe.db.set_value(row.doctype, row.name, "received_qty", row.received_qty, update_modified=False)
 		row.purchase_receipt = entries[-1].receipt if entries else None
 		if row.currency != company_currency:
 			row.exchange_rate = (
 				flt(entries[-1].conversion_rate) if entries else flt(order_rates.get(row.purchase_order))
 			)
+	doc.flags.from_receipt_refresh = True
 	doc.save(ignore_permissions=True)
 
 

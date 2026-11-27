@@ -502,3 +502,51 @@ class TestReceipts(DossierTestCase):
 		self.assertEqual(flt(row.exchange_rate), 10.8)  # back to the order's rate
 		self.assertFalse(row.purchase_receipt)
 		self.assertNotEqual(dossier.status, flow.STATUS_RECEIVED)
+
+	def submitted_receipt(self, dossier, qty=None):
+		receipt = frappe.get_doc("Purchase Receipt", flow.create_receipts(dossier.name)[0])
+		if qty is not None:
+			receipt.items[0].qty = qty
+			receipt.items[0].received_qty = qty
+			receipt.save()
+		receipt.submit()
+		return receipt
+
+	def test_a_receipt_can_be_cancelled_when_the_line_is_over_allocated_but_users_stay_guarded(self):
+		order = self.order(qty=100)
+		dossier = self.loaded(order)
+		receipt = self.submitted_receipt(dossier)
+		row = dossier.articles[0]
+		frappe.db.set_value("Dossier Importation Article", row.name, "qty", 500)  # skips validate
+		receipt.cancel()
+		dossier.reload()
+		self.assertEqual(flt(dossier.articles[0].received_qty), 0)
+		self.assertEqual(flt(dossier.articles[0].qty), 500)
+		with self.assertRaisesRegex(frappe.ValidationError, "dépasse"):
+			dossier.save()
+
+	def test_cancelling_one_of_two_receipts_falls_back_to_the_earlier_one(self):
+		order = self.order(qty=100)
+		dossier = self.loaded(order)
+		first = self.submitted_receipt(dossier, qty=60)
+		second = self.submitted_receipt(dossier)
+		dossier.reload()
+		self.assertEqual(flt(dossier.articles[0].received_qty), 100)
+		self.assertEqual(dossier.articles[0].purchase_receipt, second.name)
+		second.cancel()
+		dossier.reload()
+		self.assertEqual(dossier.articles[0].purchase_receipt, first.name)
+		self.assertEqual(flt(dossier.articles[0].received_qty), 60)
+
+	def test_drafts_and_receipts_of_another_dossier_do_not_count(self):
+		a1, a2 = self.order(), self.order()
+		dossier, other = self.loaded(a1), self.loaded(a2)
+		flow.create_receipts(dossier.name)  # a draft
+		flow.refresh_from_receipts(dossier.name)
+		dossier.reload()
+		self.assertEqual(flt(dossier.articles[0].received_qty), 0)
+		self.submitted_receipt(other)
+		flow.refresh_from_receipts(dossier.name)
+		dossier.reload()
+		self.assertEqual(flt(dossier.articles[0].received_qty), 0)
+		self.assertFalse(dossier.articles[0].purchase_receipt)
